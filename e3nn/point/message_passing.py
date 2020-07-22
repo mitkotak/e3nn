@@ -4,11 +4,11 @@ import torch_geometric as tg
 
 
 class Convolution(tg.nn.MessagePassing):
-    def __init__(self, kernel):
+    def __init__(self, kernel, kernel_groups=1):
         super(Convolution, self).__init__(aggr='add', flow='target_to_source')
-        self.kernel = kernel
+        self.kernels = [kernel for i in range(kernel_groups)]
 
-    def forward(self, features, edge_index, edge_r, size=None, n_norm=1, groups=1):
+    def forward(self, features, edge_index, edge_r, size=None, n_norm=1):
         """
         :param features: Tensor of shape [n_target, dim(Rs_in)]
         :param edge_index: LongTensor of shape [2, num_messages]
@@ -21,14 +21,15 @@ class Convolution(tg.nn.MessagePassing):
 
         :return: Tensor of shape [n_source, dim(Rs_out)]
         """
-        k = self.kernel(edge_r)
+        k = torch.stack([ker(edge_r) for ker in self.kernels], dim=1)
         k.div_(n_norm ** 0.5)
-        return self.propagate(edge_index, size=size, x=features, k=k, groups=groups)
+        return self.propagate(edge_index, size=size, x=features, k=k)
 
-    def message(self, x_j, k, groups):
+    def message(self, x_j, k):
         N = x_j.shape[0]
+        groups = len(self.kernels)
         cout, cin = k.shape[-2:]
         x_j = x_j.view(N, groups, cin)  # Rs_tp1
         if k.shape[0] == 0:  # https://github.com/pytorch/pytorch/issues/37628
             return torch.zeros(0, groups * cout)
-        return torch.einsum('eij,egj->egi', k, x_j).reshape(N, groups * cout)
+        return torch.einsum('ekij,ekj->eki', k, x_j).reshape(N, groups * cout)

@@ -16,7 +16,7 @@ class DepthwiseConvolution(torch.nn.Module):
         self.act_in = act_in
 
         act_mid = GatedBlock(Rs_mid2, scalar_activation, gate_activation)
-        self.conv = convolution(Rs_mid1, act_mid.Rs_in)
+        self.conv = convolution(Rs_mid1, act_mid.Rs_in, kernel_groups=groups)
         self.act_mid = act_mid
 
         act_out = GatedBlock(Rs_out, scalar_activation, gate_activation)
@@ -33,7 +33,7 @@ class DepthwiseConvolution(torch.nn.Module):
         features = self.lin_in(features)
         features = self.act_in(features)
 
-        features = self.conv(features, *args, **kwargs, groups=self.groups)
+        features = self.conv(features, *args, **kwargs)
         features = self.act_mid(features.reshape(-1, rs.dim(self.act_mid.Rs_in))).reshape(*features.shape[:-1], -1)
 
         features = self.lin_out(features)

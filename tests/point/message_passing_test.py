@@ -15,7 +15,9 @@ def test_equivariance(Rs_in, Rs_out, n_source, n_target, n_edge):
     torch.set_default_dtype(torch.float64)
 
     mp = Convolution(Kernel(Rs_in, Rs_out, ConstantRadialModel))
+
     groups = 4
+    mp_groups = Convolution(Kernel(Rs_in, Rs_out, ConstantRadialModel), kernel_groups=groups) 
 
     features = rs.randn(n_target, Rs_in)
     features2 = rs.randn(n_target, Rs_in * groups)
@@ -38,7 +40,7 @@ def test_equivariance(Rs_in, Rs_out, n_source, n_target, n_edge):
         ])
     print(features.shape, edge_index.shape, edge_r.shape, size)
     out1 = mp(features, edge_index, edge_r, size=size)
-    out1_groups = mp(features2, edge_index, edge_r, size=size, groups=groups)
+    out1_groups = mp_groups(features2, edge_index, edge_r, size=size)
 
     angles = o3.rand_angles()
     D_in = rs.rep(Rs_in, *angles)
@@ -48,7 +50,7 @@ def test_equivariance(Rs_in, Rs_out, n_source, n_target, n_edge):
     R = o3.rot(*angles)
 
     out2 = mp(features @ D_in.T, edge_index, edge_r @ R.T, size=size) @ D_out
-    out2_groups = mp(features2 @ D_in_groups.T, edge_index, edge_r @ R.T, size=size, groups=groups) @ D_out_groups
+    out2_groups = mp_groups(features2 @ D_in_groups.T, edge_index, edge_r @ R.T, size=size) @ D_out_groups
 
     assert (out1 - out2).abs().max() < 1e-10
     assert (out1_groups - out2_groups).abs().max() < 1e-10
@@ -73,7 +75,8 @@ def test_flow():
 
     Rs = [0]
     conv = Convolution(Kernel(Rs, Rs, ConstantRadialModel))
-    conv.kernel.R.weight.data.fill_(1.)  # Fix weight to 1.
+    for ker in conv.kernels:
+        ker.R.weight.data.fill_(1.)  # Fix weight to 1.
 
     output = conv(features, edge_index, edge_r)
     torch.allclose(output, torch.tensor([4., 0., 0., 0., 0.]).unsqueeze(-1))

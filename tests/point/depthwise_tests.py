@@ -20,8 +20,8 @@ def test_equivariance():
     Rs_mid2 = [(5, 0), (1, 1), (1, 2)]
     Rs_out = [(5, 1), (3, 2)]
 
-    convolution = lambda Rs_in, Rs_out: Convolution(Kernel(Rs_in, Rs_out, ConstantRadialModel))
     groups = 4
+    convolution = lambda Rs_in, Rs_out, kernel_groups: Convolution(Kernel(Rs_in, Rs_out, ConstantRadialModel), kernel_groups=kernel_groups)
     mp = DepthwiseConvolution(Rs_in, Rs_out, Rs_mid1, Rs_mid2, groups, convolution)
 
     features = rs.randn(n_target, Rs_in)
