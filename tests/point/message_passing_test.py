@@ -7,7 +7,7 @@ import torch
 
 from e3nn import o3, rs
 from e3nn.kernel import Kernel, GroupKernel
-from e3nn.point.message_passing import Convolution, WTPConv
+from e3nn.point.message_passing import Convolution, WTPConv, KMeans
 from e3nn.radial import ConstantRadialModel
 
 
@@ -111,3 +111,20 @@ def test_flow():
     output = conv(features, edge_index, edge_r)
     torch.allclose(output, torch.tensor(
         [0., -1., -1., -1., -1.]).unsqueeze(-1))
+
+
+def test_KMeans():
+    pos = torch.tensor([[0., 0., 0.], [0.2, 0., 0.], [1.0, 0., 0.], [1.2, 0., 0.]])
+    centers = torch.tensor([[0.1, 0., 0.], [1.1, 0., 0.]])
+    pos = torch.cat([pos, pos], dim=0)
+    batch = torch.LongTensor([0, 0, 0, 0, 1, 1, 1, 1])
+    n_clusters = torch.LongTensor([2, 2])
+    kmeans = KMeans()
+    classification, centroids, centroids_batch = kmeans.forward(pos, batch, n_clusters)
+    # Check centroids_batch
+    torch.allclose(centroids_batch, torch.LongTensor([0, 0, 1, 1]))
+    # Check groupings
+    torch.allclose(classification[torch.LongTensor([0, 2, 4, 6])], classification[torch.LongTensor([1, 3, 5, 7])])
+    # Check cluster centers
+    torch.allclose(torch.sort(centroids, dim=0)[0], torch.tensor([[0.1, 0., 0.], [0.1, 0., 0.], [1.1, 0., 0.], [1.1, 0., 0.]]))
+

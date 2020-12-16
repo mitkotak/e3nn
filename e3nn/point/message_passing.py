@@ -2,6 +2,8 @@
 import math
 import torch
 import torch_geometric as tg
+from torch_geometric.nn import nearest
+from torch_scatter import scatter_mean, scatter_std
 
 from e3nn import rsh, rs
 from e3nn.tensor_product import WeightedTensorProduct, GroupedWeightedTensorProduct
@@ -126,3 +128,81 @@ class WTPConv2(tg.nn.MessagePassing):
 
     def message(self, x_j, sh, w):
         return self.tp(x_j, sh, w)
+
+
+class Pooling(torch.nn.Module):
+    def __init__(self, bloom_conv_module, peak_module, cluster_module, gather_conv_module):
+        """[summary]
+
+        Args:
+            bloom_conv_module ([type]): This module produces
+            cluster_module ([type]): [description]
+            gather_conv_module ([type]): [description]
+        """
+        super().__init__()
+        self.bloom_conv_module = bloom_conv_module
+        self.peak_module = peak_module
+        self.cluster_module = cluster_module
+        self.gather_conv_module = gather_conv_module
+
+    def forward(self):
+        pass
+
+
+class Unpooling(torch.nn.Module):
+    def __init__(self, bloom_conv_module, peak_module, gather_conv_module):
+        """[summary]
+
+        Args:
+            bloom_conv_module ([type]): [description]
+            peak_module ([type]): [description]
+            gather_conv_module ([type]): [description]
+        """
+        super().__init__()
+        self.bloom_conv_module = bloom_conv_module
+        self.peak_module = peak_module
+        self.gather_conv_module = gather_conv_module 
+
+    def forward(self):
+        pass
+
+
+class KMeans(torch.nn.Module):
+    def __init__(self, tol=0.001, max_iter=300):
+        self.tol = tol
+        self.max_iter = max_iter
+
+        ### Need to handle cases where n_clusters is greater than number of points
+        ### Need to change initialization and handle when a cluster does not have neighbors
+
+    def initialize_centroids(self, pos, batch, n_clusters):
+        """Randomly initialize centroids based on mean and std of input point cloud.
+
+        Args:
+            pos (torch.Tensor of shape [N, 3]): Cartesian positions of nodes.
+            batch (torch.LongTensor of shape [N]): Batch index
+            n_clusters (torch.LongTensor of shape [batch]): Number of clusters for each example.
+        """
+        mean = scatter_mean(pos, batch, dim=0)
+        std = scatter_std(pos, batch, dim=0)
+        centroids_batch = torch.cat([torch.ones(n) * i for i, n in enumerate(n_clusters)]).to(torch.int64)
+        centroids = torch.randn(n_clusters.sum(), 3) * std[centroids_batch] - mean[centroids_batch]
+        return centroids, centroids_batch
+
+    def update_centroids(self, pos, batch, centroids, centroids_batch):
+        classification = nearest(pos, centroids, batch, centroids_batch)
+        print(classification)
+        print(centroids)
+        return scatter_mean(pos, classification, dim=0), classification
+
+    def forward(self, pos, batch, n_clusters):
+
+        self.centroids = {}
+
+        centroids, centroids_batch = self.initialize_centroids(pos, batch, n_clusters)
+        for _ in range(self.max_iter):
+            new_centroids, classification = self.update_centroids(pos, batch, centroids, centroids_batch)
+            print(new_centroids.shape, centroids.shape)
+            if torch.allclose(((centroids - new_centroids).norm(2, -1) < self.tol).min(), torch.ones(1).to(torch.int64)):
+                return new_centroids, centroids_batch
+        return classification, new_centroids, centroids_batch

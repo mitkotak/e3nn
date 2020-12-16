@@ -24,3 +24,11 @@ def test_user_formula():
     cart = CartesianTensor(symm_mat, "ij=ji")
     irrep_tensor = cart.to_irrep_tensor()
     assert irrep_tensor.Rs == [(1, 0, 1), (1, 2, 1)]
+
+
+def test_trivial_elasticity():
+    mat = torch.ones(3, 3, 3, 3)
+    cart = CartesianTensor(mat, "ijkl=jikl=klij")
+    _, Q = cart.to_irrep_transformation()
+    irrep = cart.to_irrep_tensor()
+    assert torch.allclose(mat.reshape(-1), torch.einsum('ix,i->x', Q, irrep.tensor))
