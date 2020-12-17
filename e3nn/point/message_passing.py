@@ -169,10 +169,10 @@ class Unpooling(torch.nn.Module):
 
 
 class KMeans(torch.nn.Module):
-    def __init__(self, tol=0.001, max_iter=300, mode=None):
+    def __init__(self, tol=0.001, max_iter=300):
+        super().__init__()
         self.tol = tol
         self.max_iter = max_iter
-        self.mode = mode  # options are 'random' or 'points'
 
     def update_centroids(self, pos, batch, centroids, centroids_batch):
         N = pos.shape[0]
@@ -183,7 +183,7 @@ class KMeans(torch.nn.Module):
         new_centroids = update * mask + centroids * (1 - mask)
         return new_centroids, classification
 
-    def forward(self, pos, batch, n_clusters, start_pos=None, start_batch=None, fps_ratio=0.5):
+    def forward(self, pos, batch, start_pos=None, start_batch=None, fps_ratio=0.5):
         if start_pos is None:
             start_pos = pos
             start_batch = batch
@@ -193,5 +193,18 @@ class KMeans(torch.nn.Module):
         for _ in range(self.max_iter):
             new_centroids, classification = self.update_centroids(pos, batch, centroids, centroids_batch)
             if ((centroids - new_centroids).norm(2, -1) < self.tol).all():
-                return new_centroids, centroids_batch
-        return classification, new_centroids, centroids_batch
+                return classification, new_centroids, centroids_batch
+            centroids = new_centroids
+        return classification, centroids, centroids_batch
+
+
+class SymmetricKMeans(KMeans):
+    def __init__(self, tol=0.001, max_iter=300, rand_iter=10):
+        super().__init__(tol, max_iter)
+        self.rand_iter = rand_iter
+
+        def forward(self, pos, batch, start_pos=None, start_batch=None, fps_ratio=0.5):
+            results = []
+            for i in range(self.rand_iter):
+                results.append(super().forward(
+                    pos, batch, start_pos=start_pos, start_batch=start_batch, fps_ratio=fps_ratio))

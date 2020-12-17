@@ -118,9 +118,8 @@ def test_KMeans():
     centers = torch.tensor([[0.1, 0., 0.], [1.1, 0., 0.]])
     pos = torch.cat([pos, pos], dim=0)
     batch = torch.LongTensor([0, 0, 0, 0, 1, 1, 1, 1])
-    n_clusters = torch.LongTensor([2, 2])
     kmeans = KMeans()
-    classification, centroids, centroids_batch = kmeans.forward(pos, batch, n_clusters)
+    classification, centroids, centroids_batch = kmeans.forward(pos, batch, fps_ratio=0.5)
     # Check centroids_batch
     assert torch.allclose(centroids_batch, torch.LongTensor([0, 0, 1, 1]))
     # Check groupings
