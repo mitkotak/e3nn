@@ -4,6 +4,7 @@ import torch
 import torch_geometric as tg
 from torch_geometric.nn import nearest
 from torch_scatter import scatter_mean, scatter_std
+from torch_cluster import fps
 
 from e3nn import rsh, rs
 from e3nn.tensor_product import WeightedTensorProduct, GroupedWeightedTensorProduct
@@ -168,41 +169,29 @@ class Unpooling(torch.nn.Module):
 
 
 class KMeans(torch.nn.Module):
-    def __init__(self, tol=0.001, max_iter=300):
+    def __init__(self, tol=0.001, max_iter=300, mode=None):
         self.tol = tol
         self.max_iter = max_iter
-
-        ### Need to handle cases where n_clusters is greater than number of points
-        ### Need to change initialization and handle when a cluster does not have neighbors
-
-    def initialize_centroids(self, pos, batch, n_clusters):
-        """Randomly initialize centroids based on mean and std of input point cloud.
-
-        Args:
-            pos (torch.Tensor of shape [N, 3]): Cartesian positions of nodes.
-            batch (torch.LongTensor of shape [N]): Batch index
-            n_clusters (torch.LongTensor of shape [batch]): Number of clusters for each example.
-        """
-        mean = scatter_mean(pos, batch, dim=0)
-        std = scatter_std(pos, batch, dim=0)
-        centroids_batch = torch.cat([torch.ones(n) * i for i, n in enumerate(n_clusters)]).to(torch.int64)
-        centroids = torch.randn(n_clusters.sum(), 3) * std[centroids_batch] - mean[centroids_batch]
-        return centroids, centroids_batch
+        self.mode = mode  # options are 'random' or 'points'
 
     def update_centroids(self, pos, batch, centroids, centroids_batch):
+        N = pos.shape[0]
+        M = centroids.shape[0]
         classification = nearest(pos, centroids, batch, centroids_batch)
-        print(classification)
-        print(centroids)
-        return scatter_mean(pos, classification, dim=0), classification
+        update = scatter_mean(pos, classification, dim=0, dim_size=M)
+        mask = scatter_mean(torch.ones(N), classification, dim=0, dim_size=M).unsqueeze(-1)
+        new_centroids = update * mask + centroids * (1 - mask)
+        return new_centroids, classification
 
-    def forward(self, pos, batch, n_clusters):
-
-        self.centroids = {}
-
-        centroids, centroids_batch = self.initialize_centroids(pos, batch, n_clusters)
+    def forward(self, pos, batch, n_clusters, start_pos=None, start_batch=None, fps_ratio=0.5):
+        if start_pos is None:
+            start_pos = pos
+            start_batch = batch
+        fps_indices = fps(start_pos, start_batch, fps_ratio)
+        centroids = start_pos[fps_indices]
+        centroids_batch = start_batch[fps_indices]
         for _ in range(self.max_iter):
             new_centroids, classification = self.update_centroids(pos, batch, centroids, centroids_batch)
-            print(new_centroids.shape, centroids.shape)
-            if torch.allclose(((centroids - new_centroids).norm(2, -1) < self.tol).min(), torch.ones(1).to(torch.int64)):
+            if ((centroids - new_centroids).norm(2, -1) < self.tol).all():
                 return new_centroids, centroids_batch
         return classification, new_centroids, centroids_batch
