@@ -182,22 +182,22 @@ class Pooling(torch.nn.Module):
         self.Rs_bloom = [(1, L, (-1)**L) for L in range(bloom_lmax + 1)]
         self.Rs_inter = self.Rs_bloom + Rs_out
         self.layers = torch.nn.ModuleDict()
-        self.layers['conv'] = bloom_conv_module(Rs_in, self.Rs_inter)
+        self.layers['conv'] = bloom_conv_module(Rs_in=Rs_in, Rs_out=self.Rs_inter)
         self.layers['bloom'] = bloom_module
-        self.layers['cluster']= cluster_module(Rs_out, Rs_out)
-        self.layers['gather'] = gather_conv_module(Rs_out, Rs_out)
+        self.layers['cluster']= cluster_module
+        self.layers['gather'] = gather_conv_module(Rs_in=Rs_out, Rs_out=Rs_out)
 
-    def forward(self, x, pos, edge_index, edge_attr, batch=None, n_norm=1):
+    def forward(self, x, pos, edge_index, edge_attr, min_radius=0.1, batch=None, n_norm=1):
         N = pos.shape[0]
-        out = self.layers['conv'](x, edge_index, edge_attr, batch=batch, n_norm=n_norm)
+        out = self.layers['conv'](x, edge_index, edge_attr, n_norm=n_norm)
         sph = out[..., :rs.dim(self.Rs_bloom)]
         x = out[..., rs.dim(self.Rs_bloom):]
-        bloom_pos, bloom_batch = self.layers['bloom'](sph, pos)
+        bloom_pos, bloom_batch = self.layers['bloom'](sph, pos, min_radius)
         clusters = self.layers['cluster'](bloom_pos, batch[bloom_batch])
         new_pos = scatter_mean(pos[bloom_batch], clusters, dim=0)
         gather_edge_index = x.new([clusters, bloom_batch]).long()  # [target, source]
         gather_edge_attr = pos[bloom_batch] - new_pos[clusters]
-        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr)
+        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm)
         new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, clusters)
         new_edge_attr = new_pos(new_edge_index[1]) - new_pos(new_edge_index[0])
         return x, new_pos, new_edge_index, new_edge_attr
@@ -237,17 +237,17 @@ class Unpooling(torch.nn.Module):
             pos_map.append(torch.LongTensor([[i] * len(old_nodes), old_nodes]))
         return torch.stack(pos_map, dim=0)  # [2, N_old]
 
-    def forward(self, x, pos, edge_index, edge_attr, batch=None, n_norm=1, r_min=0.1):
+    def forward(self, x, pos, edge_index, edge_attr, batch=None, n_norm=1, min_radius=0.1):
         N = pos.shape[0]
-        out = self.layers['conv'](x, edge_index, edge_attr, batch=batch, n_norm=n_norm)
+        out = self.layers['conv'](x, edge_index, edge_attr, n_norm=n_norm)
         sph = out[..., :rs.dim(self.Rs_bloom)]
         x = out[..., rs.dim(self.Rs_bloom):]
-        bloom_pos, bloom_batch = self.layers['bloom'](sph, pos)
+        bloom_pos, bloom_batch = self.layers['bloom'](sph, pos, min_radius)
         pos_map = self.merge_clusters(bloom_pos, r_min, batch[bloom_batch])  # Merge points
         new_pos = scatter_mean(bloom_pos, pos_map[0], dim=0)
         gather_edge_index = x.new([pos_map[0], bloom_batch]).long()  # [target, source]
         gather_edge_attr = pos[bloom_batch] - new_pos[pos_map[0]]
-        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr)
+        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm)
         # use get_new_edge_index or radius_graph?
         new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, pos_map[0])
         new_edge_attr = new_pos(new_edge_index[1]) - new_pos(new_edge_index[0])
@@ -259,27 +259,34 @@ class Bloom(torch.nn.Module):
         super().__init__()
         self.res = res
 
-    def forward(self, signal, x, pos, min_radius, percentage=False, absolute_min=0.01):
+    def forward(self, signal, pos, min_radius, percentage=False, absolute_min=0.01, use_L1=True):
         all_peaks = []
         new_indices = []
+        signal = signal.detach()
         self.used_radius = None
         for i, sig in enumerate(signal):
-            peaks, radii = SphericalTensor(sig).find_peaks(res=self.res)
+            if sig.abs().max(0)[0] > 0.:
+                peaks, radii = SphericalTensor(sig).find_peaks(res=self.res)
+            else:
+                peaks, radii = sig.new_zeros(0, 3), sig.new_zeros(0)
             if percentage:
                 self.used_radius = max((min_radius * torch.max(radii)), absolute_min)
                 keep_indices = (radii > max((min_radius * torch.max(radii)), absolute_min))
             else:
                 self.used_radius = min_radius
-                keep_indices = (radii > min_radius)
-            if len(keep_indices) == 0:
-                all_peaks.append(signal.new_zeros(1, 3))
+                keep_indices = (radii > min_radius).nonzero().reshape(-1)
+            if keep_indices.shape[0] == 0:
+                if use_L1:
+                    all_peaks.append(sig[1:1 + 3].unsqueeze(0))
+                else:
+                    all_peaks.append(signal.new_zeros(1, 3))
                 new_indices.append(signal.new_tensor([i]).long())
             else:
                 all_peaks.append(peaks[keep_indices] *
                                  radii[keep_indices].unsqueeze(-1))
                 new_indices.append(signal.new_tensor([i] * len(keep_indices)).long())
-        all_peaks = torch.stack(all_peaks, dim=0)
-        new_indices = torch.stack(new_indices, dim=0)
+        all_peaks = torch.cat(all_peaks, dim=0)
+        new_indices = torch.cat(new_indices, dim=0)
         return all_peaks + pos[new_indices], new_indices
 
 

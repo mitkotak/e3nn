@@ -7,8 +7,9 @@ import torch
 
 from e3nn import o3, rs
 from e3nn.kernel import Kernel, GroupKernel
-from e3nn.point.message_passing import Convolution, WTPConv, KMeans, SymmetricKMeans, Pooling, get_new_edge_index
+from e3nn.point.message_passing import Convolution, WTPConv, KMeans, SymmetricKMeans, Pooling, get_new_edge_index, Bloom
 from e3nn.radial import ConstantRadialModel
+from e3nn.tensor import SphericalTensor
 
 
 @pytest.mark.parametrize('Rs_in, Rs_out, n_source, n_target, n_edge', itertools.product([[1]], [[2]], [2, 3], [1, 3], [0, 3]))
@@ -169,3 +170,43 @@ def test_get_new_edge_index():
 
     new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, cluster)
     assert torch.allclose(new_edge_index, torch.LongTensor([[0, 0, 1, 1], [0, 1, 0, 1]]))
+
+
+def test_Bloom_no_peaks():
+    bloom = Bloom()
+    N = 2
+    signal = torch.zeros(N, 25)
+    signal[0, 1:4] = torch.tensor([0.01, 0.02, 0.03])
+    pos = torch.tensor([[0., 0., 0.], [1., 0., 0.]])
+    min_radius = 0.1
+    bloom_pos, bloom_batch = bloom(signal, pos, min_radius, use_L1=True)
+    assert torch.allclose(bloom_pos, torch.Tensor([[0.0100, 0.0200, 0.0300], [1.0000, 0.0000, 0.0000]]))
+    assert torch.allclose(bloom_batch, torch.LongTensor([0, 1]))
+
+
+def test_Bloom_tetra():
+    import numpy as np
+    # From @bdice
+    def sort_rounded_xyz_array(arr, decimals=4):
+        """The order of points returned is not always well-defined, such as in
+        Voronoi or UnitCell creation. Instead of testing a fixed array, arrays must
+        be sorted by their rounded representations in order to compare their
+        values.
+        """
+        
+        arr = np.asarray(arr)
+        arr = arr.round(decimals)
+        indices = np.lexsort((arr[:, 2], arr[:, 1], arr[:, 0]))
+        return arr[indices]
+
+    tetra = torch.tensor([[0., 0., 0.], [1., 1., 0], [1., 0., 1.], [0., 1., 1]])
+    tetra -= tetra.mean(dim=0, keepdims=True)
+    tetra_sph = SphericalTensor.from_geometry(tetra, 5).signal
+
+    bloom = Bloom(res=300)
+    signal = tetra_sph.unsqueeze(0)
+    pos = torch.tensor([[0., 0., 0.]])
+    min_radius = 0.1
+
+    bloom_pos, bloom_batch = bloom(signal, pos, min_radius, use_L1=True)
+    assert np.allclose(sort_rounded_xyz_array(bloom_pos), sort_rounded_xyz_array(tetra), rtol=1e-2)
