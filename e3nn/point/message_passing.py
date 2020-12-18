@@ -7,10 +7,12 @@ import torch_geometric as tg
 from torch_geometric.nn import nearest
 from torch_scatter import scatter_mean, scatter_std, scatter_add
 from torch_cluster import fps
+import torch_sparse
 
 from e3nn import rsh, rs
 from e3nn.tensor_product import WeightedTensorProduct, GroupedWeightedTensorProduct
 from e3nn.linear import Linear
+from e3nn.tensor import SphericalTensor
 
 
 class Convolution(tg.nn.MessagePassing):
@@ -134,7 +136,7 @@ class WTPConv2(tg.nn.MessagePassing):
 
 
 class Pooling(torch.nn.Module):
-    def __init__(self, bloom_conv_module, peak_module, cluster_module, gather_conv_module):
+    def __init__(self, Rs_in, Rs_out, bloom_lmax, bloom_conv_module, bloom_module, cluster_module, gather_conv_module):
         """[summary]
 
         Args:
@@ -143,17 +145,66 @@ class Pooling(torch.nn.Module):
             gather_conv_module ([type]): [description]
         """
         super().__init__()
-        self.bloom_conv_module = bloom_conv_module
-        self.peak_module = peak_module
-        self.cluster_module = cluster_module
-        self.gather_conv_module = gather_conv_module
+        self.Rs_bloom = [(1, L, (-1)**L) for L in range(bloom_lmax + 1)]
+        self.Rs_inter = self.Rs_bloom + Rs_out
+        self.layers = torch.nn.ModuleDict()
+        self.layers['conv'] = bloom_conv_module(Rs_in, self.Rs_inter)
+        self.layers['bloom'] = bloom_module
+        self.layers['cluster']= cluster_module(Rs_out, Rs_out)
+        self.layers['gather'] = gather_conv_module(Rs_out, Rs_out)
 
-    def forward(self):
-        pass
+    @classmethod
+    def new_edge_index(self, N, edge_index, bloom_batch, cluster):
+        """[summary]
+
+        Args:
+            N (int): number of original nodes
+            edge_index (torch.LongTensor of shape [2, num_edges]): initial edge_index
+            bloom_batch (torch.LongTensor of shape [num_bloom_nodes]): mapping of bloomed nodes to original nodes
+            cluster (torch.LongTensor of shape [num_bloom_nodes]): mapping of bloomed nodes to new nodes
+
+        Returns:
+            [type]: [description]
+        """
+        B, C = len(bloom_batch), max(cluster + 1)
+        bloom_index = torch.stack([bloom_batch, torch.arange(len(bloom_batch))], dim=0)
+        cluster_index = torch.stack([torch.arange(len(bloom_batch)), cluster], dim=0)
+        E, F, G = edge_index.shape[-1], bloom_index.shape[-1],  cluster_index.shape[-1]
+        convert_edge_index, vals = torch_sparse.spspmm(
+            edge_index, torch.ones(E),
+            bloom_index, torch.ones(F),
+            N, N, B
+        )
+        convert_edge_index, vals = torch_sparse.spspmm(
+            convert_edge_index, torch.ones(len(vals)),
+            cluster_index, torch.ones(G),
+            N, B, C
+        )
+        new_edge_index, vals = torch_sparse.spspmm(
+            convert_edge_index[[1, 0], :], torch.ones(len(vals)),
+            convert_edge_index, torch.ones(len(vals)),
+            C, N, C
+        )
+        return new_edge_index
+
+    def forward(self, x, pos, edge_index, edge_attr, batch=None, n_norm=1):
+        N = pos.shape[0]
+        out = self.layers['conv'](x, edge_index, edge_attr, batch=batch, n_norm=n_norm)
+        sph = out[..., :rs.dim(self.Rs_bloom)]
+        x = out[..., rs.dim(self.Rs_bloom):]
+        bloom_pos, bloom_batch = self.layers['bloom'](sph, pos)
+        clusters = self.layers['cluster'](bloom_pos, batch[bloom_batch])
+        new_pos = scatter_mean(pos[bloom_batch], clusters, dim=0)
+        gather_edge_index = x.new([clusters, bloom_batch]).long()  # [target, source]
+        gather_edge_attr = pos[bloom_batch] - new_pos[clusters]
+        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr)
+        new_edge_index = self.new_edge_index(N, edge_index, bloom_batch, cluster)
+        new_edge_attr = new_pos(new_edge_index[1]) - new_pos(new_edge_index[0])
+        return x, new_pos, new_edge_index, new_edge_attr
 
 
 class Unpooling(torch.nn.Module):
-    def __init__(self, bloom_conv_module, peak_module, gather_conv_module):
+    def __init__(self, Rs_in, Rs_out, bloom_conv_module, peak_module, gather_conv_module):
         """[summary]
 
         Args:
@@ -168,6 +219,35 @@ class Unpooling(torch.nn.Module):
 
     def forward(self):
         pass
+
+
+class Bloom(torch.nn.Module):
+    def __init__(self, res=200):
+        super().__init__()
+        self.res = res
+
+    def forward(self, signal, x, pos, min_radius, percentage=False, absolute_min=0.01):
+        all_peaks = []
+        new_indices = []
+        self.used_radius = None
+        for i, sig in enumerate(signal):
+            peaks, radii = SphericalTensor(sig).find_peaks(res=self.res)
+            if percentage:
+                self.used_radius = max((min_radius * torch.max(radii)), absolute_min)
+                keep_indices = (radii > max((min_radius * torch.max(radii)), absolute_min))
+            else:
+                self.used_radius = min_radius
+                keep_indices = (radii > min_radius)
+            if len(keep_indices) == 0:
+                all_peaks.append(signal.new_zeros(1, 3))
+                new_indices.append(signal.new_tensor([i]).long())
+            else:
+                all_peaks.append(peaks[keep_indices] *
+                                 radii[keep_indices].unsqueeze(-1))
+                new_indices.append(signal.new_tensor([i] * len(keep_indices)).long())
+        all_peaks = torch.stack(all_peaks, dim=0)
+        new_indices = torch.stack(new_indices, dim=0)
+        return all_peaks + pos[new_indices], new_indices
 
 
 class KMeans(torch.nn.Module):
@@ -222,8 +302,8 @@ class SymmetricKMeans(KMeans):
         else:
             big_start_pos = None
             big_start_batch = None
-        classification, centroids, centroids_batch = super().forward(big_pos, big_batch, start_pos=big_start_pos, start_batch=big_start_batch, fps_ratio=fps_ratio)
-        scores = scatter_add((big_pos - centroids[classification]).norm(self.score_norm, -1), big_batch, dim=0)
+        classification, centroids, _ = super().forward(big_pos, big_batch, start_pos=big_start_pos, start_batch=big_start_batch, fps_ratio=fps_ratio)
+        scores = self.score(big_pos, big_batch, centroids, classification)
         scores = scores.reshape(self.rand_iter, -1).sum(1)
         # sorts = torch.argsort(scores, dim=0)
         cluster_dicts = []
