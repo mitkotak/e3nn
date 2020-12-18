@@ -7,7 +7,7 @@ import torch
 
 from e3nn import o3, rs
 from e3nn.kernel import Kernel, GroupKernel
-from e3nn.point.message_passing import Convolution, WTPConv, KMeans
+from e3nn.point.message_passing import Convolution, WTPConv, KMeans, SymmetricKMeans
 from e3nn.radial import ConstantRadialModel
 
 
@@ -126,3 +126,23 @@ def test_KMeans():
     assert torch.allclose(classification[torch.LongTensor([0, 2, 4, 6])], classification[torch.LongTensor([1, 3, 5, 7])])
     # Check cluster centers
     assert torch.allclose(torch.sort(centroids, dim=0)[0], torch.tensor([[0.1, 0., 0.], [0.1, 0., 0.], [1.1, 0., 0.], [1.1, 0., 0.]]))
+
+
+def test_SymmetricKMeans():
+    kmeans = SymmetricKMeans(rand_iter=10)
+
+    batch = torch.LongTensor([0, 0, 0, 0, 1, 1, 1, 1])
+
+    pos = torch.tensor([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.], [1., 1., 0.]])  # Square
+    pos = torch.cat([pos, pos], dim=0)
+    labels = kmeans.forward(pos, batch)
+    truth = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1]).to(torch.int64)
+    print(labels, truth)
+    assert torch.allclose(labels, truth)
+
+    pos = torch.tensor([[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [2., 1., 0.]])  # Zig
+    pos = torch.cat([pos, pos], dim=0)
+    labels = kmeans.forward(pos, batch)
+    truth = torch.tensor([0, 0, 1, 1, 2, 2, 3, 3]).to(torch.int64)
+    print(labels, truth)
+    assert torch.allclose(labels, truth)

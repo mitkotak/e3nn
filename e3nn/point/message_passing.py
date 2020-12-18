@@ -1,9 +1,11 @@
 # pylint: disable=arguments-differ, redefined-builtin, missing-docstring, no-member, invalid-name, line-too-long, not-callable, abstract-method
 import math
+import collections
+import networkx as nx
 import torch
 import torch_geometric as tg
 from torch_geometric.nn import nearest
-from torch_scatter import scatter_mean, scatter_std
+from torch_scatter import scatter_mean, scatter_std, scatter_add
 from torch_cluster import fps
 
 from e3nn import rsh, rs
@@ -169,10 +171,15 @@ class Unpooling(torch.nn.Module):
 
 
 class KMeans(torch.nn.Module):
-    def __init__(self, tol=0.001, max_iter=300):
+    def __init__(self, tol=0.001, max_iter=300, score_norm=1):
         super().__init__()
         self.tol = tol
         self.max_iter = max_iter
+        self.score_norm = score_norm
+
+    def score(self, pos, batch, centroids, classification):
+        scores = (pos - centroids[classification]).norm(self.score_norm, -1)
+        return scatter_add(scores, batch, dim=0)
 
     def update_centroids(self, pos, batch, centroids, centroids_batch):
         N = pos.shape[0]
@@ -199,12 +206,45 @@ class KMeans(torch.nn.Module):
 
 
 class SymmetricKMeans(KMeans):
-    def __init__(self, tol=0.001, max_iter=300, rand_iter=10):
-        super().__init__(tol, max_iter)
+    def __init__(self, tol=0.001, max_iter=300, rand_iter=10, score_norm=1):
+        super().__init__(tol, max_iter, score_norm=score_norm)
         self.rand_iter = rand_iter
+        self.score_norm = score_norm
 
-        def forward(self, pos, batch, start_pos=None, start_batch=None, fps_ratio=0.5):
-            results = []
-            for i in range(self.rand_iter):
-                results.append(super().forward(
-                    pos, batch, start_pos=start_pos, start_batch=start_batch, fps_ratio=fps_ratio))
+    def forward(self, pos, batch, start_pos=None, start_batch=None, fps_ratio=0.5):
+        N = pos.shape[0]
+        # Use giant batch for iterations of KMeans
+        big_pos = torch.cat(self.rand_iter * [pos], dim=0)
+        big_batch = (batch.unsqueeze(0).repeat(self.rand_iter, 1) + torch.arange(self.rand_iter).unsqueeze(-1) * (batch.max() + 1)).reshape(-1)
+        if start_batch is not None:
+            big_start_pos = torch.cat(self.rand_iter * [start_pos], dim=0)
+            big_start_batch = (start_batch.unsqueeze(0).repeat(self.rand_iter, 1) + torch.arange(self.rand_iter).unsqueeze(-1) * (start_batch.max() + 1)).reshape(-1)
+        else:
+            big_start_pos = None
+            big_start_batch = None
+        classification, centroids, centroids_batch = super().forward(big_pos, big_batch, start_pos=big_start_pos, start_batch=big_start_batch, fps_ratio=fps_ratio)
+        scores = scatter_add((big_pos - centroids[classification]).norm(self.score_norm, -1), big_batch, dim=0)
+        scores = scores.reshape(self.rand_iter, -1).sum(1)
+        # sorts = torch.argsort(scores, dim=0)
+        cluster_dicts = []
+        for index, score in zip(classification.reshape(self.rand_iter, -1), scores):
+            d = collections.defaultdict(list)
+            if score <= min(scores):  # This is technically too restrictive 
+                for i, c in enumerate(index):
+                    d[c.item()].append(i)
+                cluster_dicts.append(d)
+
+        G = nx.Graph()
+        N = pos.shape[0]
+        [G.add_node(i) for i in range(N)]
+        for cluster_dict in cluster_dicts:
+            for cluster in cluster_dict:
+                values = cluster_dict[cluster]
+                for i in range(len(values) - 1):
+                    G.add_edge(values[i], values[i + 1])
+
+        node_groups = [list(G.subgraph(c).nodes) for c in nx.connected_components(G)]
+        labels = pos.new_zeros(pos.shape[0])
+        for i in range(len(node_groups)):
+            labels[node_groups[i]] = i
+        return labels.to(torch.int64)
