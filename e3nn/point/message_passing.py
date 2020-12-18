@@ -4,7 +4,7 @@ import collections
 import networkx as nx
 import torch
 import torch_geometric as tg
-from torch_geometric.nn import nearest
+from torch_geometric.nn import nearest, radius_graph
 from torch_scatter import scatter_mean, scatter_std, scatter_add
 from torch_cluster import fps
 import torch_sparse
@@ -135,6 +135,40 @@ class WTPConv2(tg.nn.MessagePassing):
         return self.tp(x_j, sh, w)
 
 
+def get_new_edge_index(N, edge_index, bloom_batch, cluster):
+    """Get new edge_index for pooled geometry based on original edge_index
+
+    Args:
+        N (int): number of original nodes
+        edge_index (torch.LongTensor of shape [2, num_edges]): original edge_index
+        bloom_batch (torch.LongTensor of shape [num_bloom_nodes]): mapping of bloomed nodes to original nodes
+        cluster (torch.LongTensor of shape [num_bloom_nodes]): mapping of bloomed nodes to new nodes
+
+    Returns:
+        torch.LongTensor of shape [2, num_new_edges]: new edge_index
+    """
+    B, C = len(bloom_batch), max(cluster + 1)
+    bloom_index = torch.stack([bloom_batch, torch.arange(len(bloom_batch))], dim=0)
+    cluster_index = torch.stack([torch.arange(len(bloom_batch)), cluster], dim=0)
+    E, F, G = edge_index.shape[-1], bloom_index.shape[-1], cluster_index.shape[-1]
+    convert_edge_index, vals = torch_sparse.spspmm(
+        edge_index, torch.ones(E),
+        bloom_index, torch.ones(F),
+        N, N, B
+    )
+    convert_edge_index, vals = torch_sparse.spspmm(
+        convert_edge_index, torch.ones(len(vals)),
+        cluster_index, torch.ones(G),
+        N, B, C
+    )
+    new_edge_index, vals = torch_sparse.spspmm(
+        convert_edge_index[[1, 0], :], torch.ones(len(vals)),
+        convert_edge_index, torch.ones(len(vals)),
+        C, N, C
+    )
+    return new_edge_index
+
+
 class Pooling(torch.nn.Module):
     def __init__(self, Rs_in, Rs_out, bloom_lmax, bloom_conv_module, bloom_module, cluster_module, gather_conv_module):
         """[summary]
@@ -153,40 +187,6 @@ class Pooling(torch.nn.Module):
         self.layers['cluster']= cluster_module(Rs_out, Rs_out)
         self.layers['gather'] = gather_conv_module(Rs_out, Rs_out)
 
-    @classmethod
-    def new_edge_index(self, N, edge_index, bloom_batch, cluster):
-        """[summary]
-
-        Args:
-            N (int): number of original nodes
-            edge_index (torch.LongTensor of shape [2, num_edges]): initial edge_index
-            bloom_batch (torch.LongTensor of shape [num_bloom_nodes]): mapping of bloomed nodes to original nodes
-            cluster (torch.LongTensor of shape [num_bloom_nodes]): mapping of bloomed nodes to new nodes
-
-        Returns:
-            [type]: [description]
-        """
-        B, C = len(bloom_batch), max(cluster + 1)
-        bloom_index = torch.stack([bloom_batch, torch.arange(len(bloom_batch))], dim=0)
-        cluster_index = torch.stack([torch.arange(len(bloom_batch)), cluster], dim=0)
-        E, F, G = edge_index.shape[-1], bloom_index.shape[-1],  cluster_index.shape[-1]
-        convert_edge_index, vals = torch_sparse.spspmm(
-            edge_index, torch.ones(E),
-            bloom_index, torch.ones(F),
-            N, N, B
-        )
-        convert_edge_index, vals = torch_sparse.spspmm(
-            convert_edge_index, torch.ones(len(vals)),
-            cluster_index, torch.ones(G),
-            N, B, C
-        )
-        new_edge_index, vals = torch_sparse.spspmm(
-            convert_edge_index[[1, 0], :], torch.ones(len(vals)),
-            convert_edge_index, torch.ones(len(vals)),
-            C, N, C
-        )
-        return new_edge_index
-
     def forward(self, x, pos, edge_index, edge_attr, batch=None, n_norm=1):
         N = pos.shape[0]
         out = self.layers['conv'](x, edge_index, edge_attr, batch=batch, n_norm=n_norm)
@@ -198,13 +198,13 @@ class Pooling(torch.nn.Module):
         gather_edge_index = x.new([clusters, bloom_batch]).long()  # [target, source]
         gather_edge_attr = pos[bloom_batch] - new_pos[clusters]
         x = self.layers['gather'](x, gather_edge_index, gather_edge_attr)
-        new_edge_index = self.new_edge_index(N, edge_index, bloom_batch, cluster)
+        new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, clusters)
         new_edge_attr = new_pos(new_edge_index[1]) - new_pos(new_edge_index[0])
         return x, new_pos, new_edge_index, new_edge_attr
 
 
 class Unpooling(torch.nn.Module):
-    def __init__(self, Rs_in, Rs_out, bloom_conv_module, peak_module, gather_conv_module):
+    def __init__(self, Rs_in, Rs_out, bloom_lmax, bloom_conv_module, bloom_module, gather_conv_module):
         """[summary]
 
         Args:
@@ -213,12 +213,45 @@ class Unpooling(torch.nn.Module):
             gather_conv_module ([type]): [description]
         """
         super().__init__()
-        self.bloom_conv_module = bloom_conv_module
-        self.peak_module = peak_module
-        self.gather_conv_module = gather_conv_module 
+        self.Rs_bloom = [(1, L, (-1)**L) for L in range(bloom_lmax + 1)]
+        self.Rs_inter = self.Rs_bloom + Rs_out
+        self.layers = torch.nn.ModuleDict()
+        self.layers['conv'] = bloom_conv_module(Rs_in, self.Rs_inter)
+        self.layers['bloom'] = bloom_module
+        self.layers['gather'] = gather_conv_module(Rs_out, Rs_out)
 
-    def forward(self):
-        pass
+    @classmethod
+    def merge_clusters(self, pos, r, batch):
+        # edges to merge
+        edge_index = radius_graph(pos, r, batch=batch, loop=False)
+        G = nx.Graph()
+        G.add_nodes_from(range(pos.shape[0]))
+
+        for i, (u, v) in enumerate(edge_index.t().tolist()):
+            if v > u:
+                continue
+            G.add_edge(u, v)
+        pos_map = []
+        for i, g in enumerate(nx.connected_component_subgraphs(G)):
+            old_nodes = list(g.nodes.keys())
+            pos_map.append(torch.LongTensor([[i] * len(old_nodes), old_nodes]))
+        return torch.stack(pos_map, dim=0)  # [2, N_old]
+
+    def forward(self, x, pos, edge_index, edge_attr, batch=None, n_norm=1, r_min=0.1):
+        N = pos.shape[0]
+        out = self.layers['conv'](x, edge_index, edge_attr, batch=batch, n_norm=n_norm)
+        sph = out[..., :rs.dim(self.Rs_bloom)]
+        x = out[..., rs.dim(self.Rs_bloom):]
+        bloom_pos, bloom_batch = self.layers['bloom'](sph, pos)
+        pos_map = self.merge_clusters(bloom_pos, r_min, batch[bloom_batch])  # Merge points
+        new_pos = scatter_mean(bloom_pos, pos_map[0], dim=0)
+        gather_edge_index = x.new([pos_map[0], bloom_batch]).long()  # [target, source]
+        gather_edge_attr = pos[bloom_batch] - new_pos[pos_map[0]]
+        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr)
+        # use get_new_edge_index or radius_graph?
+        new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, pos_map[0])
+        new_edge_attr = new_pos(new_edge_index[1]) - new_pos(new_edge_index[0])
+        return x, new_pos, new_edge_index, new_edge_attr
 
 
 class Bloom(torch.nn.Module):

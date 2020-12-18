@@ -7,7 +7,7 @@ import torch
 
 from e3nn import o3, rs
 from e3nn.kernel import Kernel, GroupKernel
-from e3nn.point.message_passing import Convolution, WTPConv, KMeans, SymmetricKMeans, Pooling
+from e3nn.point.message_passing import Convolution, WTPConv, KMeans, SymmetricKMeans, Pooling, get_new_edge_index
 from e3nn.radial import ConstantRadialModel
 
 
@@ -148,7 +148,7 @@ def test_SymmetricKMeans():
     assert torch.allclose(labels, truth)
 
 
-def test_Pooling_new_edge_index():
+def test_get_new_edge_index():
     N, B, C = 3, 6, 2
     edge_index = torch.LongTensor([[0, 1, 1, 2], [1, 0, 2, 1]])
     bloom_batch = torch.LongTensor([0, 0, 1, 1, 2, 2])
@@ -156,7 +156,7 @@ def test_Pooling_new_edge_index():
     assert(B == len(bloom_batch))
     assert(C == max(cluster + 1))
 
-    new_edge_index = Pooling.new_edge_index(N, edge_index, bloom_batch, cluster)
+    new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, cluster)
     assert torch.allclose(new_edge_index, torch.LongTensor([[0, 0, 1, 1], [0, 1, 0, 1]]))
 
     N, B, C = 4, 6, 2
@@ -167,5 +167,5 @@ def test_Pooling_new_edge_index():
     assert(B == len(bloom_batch))
     assert(C == max(cluster + 1))
 
-    new_edge_index = Pooling.new_edge_index(N, edge_index, bloom_batch, cluster)
+    new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, cluster)
     assert torch.allclose(new_edge_index, torch.LongTensor([[0, 0, 1, 1], [0, 1, 0, 1]]))
