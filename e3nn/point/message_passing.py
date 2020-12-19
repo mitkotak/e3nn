@@ -152,21 +152,31 @@ def get_new_edge_index(N, edge_index, bloom_batch, cluster):
     cluster_index = torch.stack([torch.arange(len(bloom_batch)), cluster], dim=0)
     E, F, G = edge_index.shape[-1], bloom_index.shape[-1], cluster_index.shape[-1]
     convert_edge_index, vals = torch_sparse.spspmm(
-        edge_index, torch.ones(E),
-        bloom_index, torch.ones(F),
+        edge_index, edge_index.new_ones(E, dtype=torch.float32),
+        bloom_index, edge_index.new_ones(F, dtype=torch.float32),
         N, N, B
     )
     convert_edge_index, vals = torch_sparse.spspmm(
-        convert_edge_index, torch.ones(len(vals)),
-        cluster_index, torch.ones(G),
+        convert_edge_index, edge_index.new_ones(len(vals), dtype=torch.float32),
+        cluster_index, edge_index.new_ones(G, dtype=torch.float32),
         N, B, C
     )
     new_edge_index, vals = torch_sparse.spspmm(
-        convert_edge_index[[1, 0], :], torch.ones(len(vals)),
-        convert_edge_index, torch.ones(len(vals)),
+        convert_edge_index[[1, 0], :], edge_index.new_ones(len(vals), dtype=torch.float32),
+        convert_edge_index, edge_index.new_ones(len(vals), dtype=torch.float32),
         C, N, C
     )
     return new_edge_index
+
+
+def get_new_batch(gather_edge_index, batch):
+    C, N, B = max(gather_edge_index[0]) + 1, len(batch), max(batch) + 1
+    batch_index = torch.stack([torch.arange(batch.shape[0]), batch])
+    new_batch_index = torch_sparse.spspmm(
+        gather_edge_index, batch.new_ones(N),
+        batch_index, batch.new_ones(N),
+        C, N, B)[0]
+    return new_batch_index[1]
 
 
 class Pooling(torch.nn.Module):
@@ -193,14 +203,16 @@ class Pooling(torch.nn.Module):
         sph = out[..., :rs.dim(self.Rs_bloom)]
         x = out[..., rs.dim(self.Rs_bloom):]
         bloom_pos, bloom_batch = self.layers['bloom'](sph, pos, min_radius)
-        clusters = self.layers['cluster'](bloom_pos, batch[bloom_batch])
+        clusters = self.layers['cluster'](bloom_pos, batch[bloom_batch], start_pos=pos, start_batch=batch)
         new_pos = scatter_mean(pos[bloom_batch], clusters, dim=0)
-        gather_edge_index = x.new([clusters, bloom_batch]).long()  # [target, source]
+        gather_edge_index = torch.stack([clusters, bloom_batch], dim=0)  # [target, source]
         gather_edge_attr = pos[bloom_batch] - new_pos[clusters]
-        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm)
+        C = int(max(clusters)) + 1
+        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, N, C))
         new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, clusters)
-        new_edge_attr = new_pos(new_edge_index[1]) - new_pos(new_edge_index[0])
-        return x, new_pos, new_edge_index, new_edge_attr
+        new_edge_attr = new_pos[new_edge_index[1]] - new_pos[new_edge_index[0]]
+        new_batch = get_new_batch(gather_edge_index, batch[bloom_batch])
+        return x, new_pos, new_edge_index, new_edge_attr, new_batch
 
 
 class Unpooling(torch.nn.Module):
@@ -243,9 +255,9 @@ class Unpooling(torch.nn.Module):
         sph = out[..., :rs.dim(self.Rs_bloom)]
         x = out[..., rs.dim(self.Rs_bloom):]
         bloom_pos, bloom_batch = self.layers['bloom'](sph, pos, min_radius)
-        pos_map = self.merge_clusters(bloom_pos, r_min, batch[bloom_batch])  # Merge points
+        pos_map = self.merge_clusters(bloom_pos, min_radius, batch[bloom_batch])  # Merge points
         new_pos = scatter_mean(bloom_pos, pos_map[0], dim=0)
-        gather_edge_index = x.new([pos_map[0], bloom_batch]).long()  # [target, source]
+        gather_edge_index = torch.stack([pos_map[0], bloom_batch], dim=0)  # [target, source]
         gather_edge_attr = pos[bloom_batch] - new_pos[pos_map[0]]
         x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm)
         # use get_new_edge_index or radius_graph?
