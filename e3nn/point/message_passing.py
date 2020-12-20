@@ -154,17 +154,17 @@ def get_new_edge_index(N, edge_index, bloom_batch, cluster):
     convert_edge_index, vals = torch_sparse.spspmm(
         edge_index, edge_index.new_ones(E, dtype=torch.float32),
         bloom_index, edge_index.new_ones(F, dtype=torch.float32),
-        N, N, B
+        N, N, B, coalesced=True
     )
     convert_edge_index, vals = torch_sparse.spspmm(
         convert_edge_index, edge_index.new_ones(len(vals), dtype=torch.float32),
         cluster_index, edge_index.new_ones(G, dtype=torch.float32),
-        N, B, C
+        N, B, C, coalesced=True
     )
     new_edge_index, vals = torch_sparse.spspmm(
         convert_edge_index[[1, 0], :], edge_index.new_ones(len(vals), dtype=torch.float32),
         convert_edge_index, edge_index.new_ones(len(vals), dtype=torch.float32),
-        C, N, C
+        C, N, C, coalesced=True
     )
     return new_edge_index
 
@@ -175,7 +175,7 @@ def get_new_batch(gather_edge_index, batch):
     new_batch_index = torch_sparse.spspmm(
         gather_edge_index, batch.new_ones(N),
         batch_index, batch.new_ones(N),
-        C, N, B)[0]
+        C, N, B, coalesced=True)[0]
     return new_batch_index[1]
 
 
@@ -204,7 +204,12 @@ class Pooling(torch.nn.Module):
         x = out[..., rs.dim(self.Rs_bloom):]
         bloom_pos, bloom_batch = self.layers['bloom'](sph, pos, min_radius)
         clusters = self.layers['cluster'](bloom_pos, batch[bloom_batch], start_pos=pos, start_batch=batch)
-        new_pos = scatter_mean(pos[bloom_batch], clusters, dim=0)
+        cluster_index = torch.stack([clusters, bloom_batch], dim=0)
+        cluster_index = torch_sparse.coalesce(  # Remove duplicate edges
+            cluster_index,
+            x.new_ones(cluster_index.shape[-1]),
+            max(clusters) + 1, max(batch) + 1)[0]
+        new_pos = scatter_mean(pos[cluster_index[1]], cluster_index[0], dim=0)
         gather_edge_index = torch.stack([clusters, bloom_batch], dim=0)  # [target, source]
         gather_edge_attr = pos[bloom_batch] - new_pos[clusters]
         C = int(max(clusters)) + 1

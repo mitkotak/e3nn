@@ -245,3 +245,34 @@ def test_Bloom_tetra():
 
     bloom_pos, _ = bloom(signal, pos, min_radius, use_L1=True)
     assert np.allclose(sort_rounded_xyz_array(bloom_pos), sort_rounded_xyz_array(tetra), rtol=1e-2)
+
+
+def test_Pooling():
+    from e3nn.networks import GatedConvParityNetwork
+    from e3nn.point.data_helpers import DataNeighbors
+    from functools import partial
+
+    bloom_lmax = 4
+    rmax = 3.
+    conv_kwargs = dict(
+        mul=4, number_of_basis=5, lmax=bloom_lmax, max_radius=rmax, convolution=Convolution, layers=3,
+    )
+    Rs_in = [(1, 0, 1)]
+    Rs_out = [(4, 0, 1), (4, 0, -1), (4, 1, 1), (4, 1, -1), (4, 2, 1), (4, 2, -1)]
+
+    conv = partial(GatedConvParityNetwork, **conv_kwargs)
+    bloom = Bloom(res=300)
+    cluster = SymmetricKMeans(rand_iter=20)
+
+    pool = Pooling(Rs_in, Rs_out, bloom_lmax, conv, bloom, cluster, conv)
+
+    shape = torch.tensor([(0, 0, 0), (1, 0, 0), (1, 1, 0), (2, 1, 0)]).double()  # zigzag
+    x = torch.ones(4, 1).double()
+    data = DataNeighbors(x, shape, rmax, self_interaction=False)
+
+    # x, new_pos, new_edge_index, new_edge_attr, new_batch
+    _ = pool.forward(
+        data.x, data.pos, data.edge_index,
+        data.edge_attr, batch=torch.zeros(4).long(),
+        n_norm=5  # Bloom is sensitive to this
+    )
