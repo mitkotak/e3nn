@@ -149,6 +149,31 @@ def test_SymmetricKMeans():
     assert torch.allclose(labels, truth)
 
 
+def test_SymmetryKMeans_cluster_edge_index_by_score():
+    kmeans = SymmetricKMeans(rand_iter=2)
+    batch = torch.LongTensor([0, 0, 0, 0, 0, 0, 1, 1, 1])
+    classification = torch.LongTensor([
+        [0, 0, 0, 1, 1, 1, 2, 2, 2],
+        [3, 3, 4, 4, 5, 5, 6, 6, 7],
+        [8, 8, 8, 9, 9, 9, 10, 11, 12]
+    ])
+    scores = torch.tensor([
+        [0.0, 0.0],
+        [1.0, 0.5],
+        [0.0, 1.0]
+    ])
+    num_centroids = 13
+
+    test_cluster_edge_index = torch.LongTensor([
+        [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 6, 7, 7, 7, 8, 8, 8],
+        [0, 1, 2, 0, 1, 2, 0, 1, 2, 3, 4, 5, 3, 4, 5, 3, 4, 5, 6, 7, 8, 6, 7, 8, 6, 7, 8]
+    ])
+
+    cluster_edge_index = kmeans.cluster_edge_index_by_score(
+        scores, classification, num_centroids, batch)
+    assert torch.allclose(cluster_edge_index, test_cluster_edge_index)
+
+
 def test_get_new_edge_index():
     N, B, C = 3, 6, 2
     edge_index = torch.LongTensor([[0, 1, 1, 2], [1, 0, 2, 1]])

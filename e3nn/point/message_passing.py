@@ -343,6 +343,26 @@ class SymmetricKMeans(KMeans):
         self.rand_iter = rand_iter
         self.score_norm = score_norm
 
+    def cluster_edge_index_by_score(self, scores, classification, num_centroids, batch):
+        N = batch.shape[0]
+        batch_index = torch.stack([batch, torch.arange(N)], dim=0)
+        min_scores = scores.min(dim=0)[0]
+        best_scores = (scores <= min_scores).nonzero()
+        R, B, N, C = self.rand_iter, max(batch) + 1, batch.shape[0], num_centroids
+        best_classifications = torch_sparse.spspmm(
+            best_scores.T, scores.new_ones(best_scores.shape[0]),
+            batch_index, scores.new_ones(N),
+            R, B, N, coalesced=True
+        )[0]
+        best_clusters = classification[best_classifications[0], best_classifications[1]]
+        cluster_index = torch.stack([best_clusters, best_classifications[1]], dim=0)
+        cluster_edge_index = torch_sparse.spspmm(
+            cluster_index[[1, 0]], scores.new_ones(cluster_index.shape[-1]),
+            cluster_index, scores.new_ones(cluster_index.shape[-1]),
+            N, C, N, coalesced=True
+        )
+        return cluster_edge_index[0]
+
     def forward(self, pos, batch, start_pos=None, start_batch=None, fps_ratio=0.5):
         N = pos.shape[0]
         # Use giant batch for iterations of KMeans
@@ -356,26 +376,21 @@ class SymmetricKMeans(KMeans):
             big_start_batch = None
         classification, centroids, _ = super().forward(big_pos, big_batch, start_pos=big_start_pos, start_batch=big_start_batch, fps_ratio=fps_ratio)
         scores = self.score(big_pos, big_batch, centroids, classification)
-        scores = scores.reshape(self.rand_iter, -1).sum(1)
-        # sorts = torch.argsort(scores, dim=0)
-        cluster_dicts = []
-        for index, score in zip(classification.reshape(self.rand_iter, -1), scores):
-            d = collections.defaultdict(list)
-            if score <= min(scores):  # This is technically too restrictive 
-                for i, c in enumerate(index):
-                    d[c.item()].append(i)
-                cluster_dicts.append(d)
+        scores = scores.reshape(self.rand_iter, -1)
+        classification = classification.reshape(self.rand_iter, -1)
+        num_centroids = centroids.shape[0]
+        cluster_edge_index = self.cluster_edge_index_by_score(
+            scores, classification, num_centroids, batch)  # Don't need to reshape centroids
 
+        # Get connected components
         G = nx.Graph()
-        N = pos.shape[0]
+        N = int(pos.shape[0])
         [G.add_node(i) for i in range(N)]
-        for cluster_dict in cluster_dicts:
-            for cluster in cluster_dict:
-                values = cluster_dict[cluster]
-                for i in range(len(values) - 1):
-                    G.add_edge(values[i], values[i + 1])
-
+        for i, j in cluster_edge_index.T:
+            if i <= j:  # NetworkX graphs only need single edge
+                G.add_edge(int(i), int(j))
         node_groups = [list(G.subgraph(c).nodes) for c in nx.connected_components(G)]
+        print(node_groups)
         labels = pos.new_zeros(pos.shape[0])
         for i in range(len(node_groups)):
             labels[node_groups[i]] = i
