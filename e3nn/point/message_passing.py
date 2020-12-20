@@ -244,15 +244,19 @@ class Unpooling(torch.nn.Module):
         G = nx.Graph()
         G.add_nodes_from(range(pos.shape[0]))
 
-        for i, (u, v) in enumerate(edge_index.t().tolist()):
+        for i, (u, v) in enumerate(edge_index.T.tolist()):
             if v > u:
                 continue
-            G.add_edge(u, v)
+            G.add_edge(int(u), int(v))
         pos_map = []
-        for i, g in enumerate(nx.connected_component_subgraphs(G)):
-            old_nodes = list(g.nodes.keys())
-            pos_map.append(torch.LongTensor([[i] * len(old_nodes), old_nodes]))
-        return torch.stack(pos_map, dim=0)  # [2, N_old]
+        node_groups = [list(G.subgraph(c).nodes) for c in nx.connected_components(G)]
+        for i, g in enumerate(node_groups):
+            pos_map_index = torch.stack([
+                torch.LongTensor([i] * len(g)),
+                torch.LongTensor(g)
+            ], dim=0)
+            pos_map.append(pos_map_index)
+        return torch.cat(pos_map, dim=-1)  # [2, N_old]
 
     def forward(self, x, pos, edge_index, edge_attr, batch=None, n_norm=1, min_radius=0.1):
         N = pos.shape[0]

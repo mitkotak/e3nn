@@ -7,7 +7,7 @@ import torch
 
 from e3nn import o3, rs
 from e3nn.kernel import Kernel, GroupKernel
-from e3nn.point.message_passing import Convolution, WTPConv, KMeans, SymmetricKMeans, Pooling, get_new_edge_index, get_new_batch, Bloom
+from e3nn.point.message_passing import Convolution, WTPConv, KMeans, SymmetricKMeans, Pooling, Unpooling, get_new_edge_index, get_new_batch, Bloom
 from e3nn.radial import ConstantRadialModel
 from e3nn.tensor import SphericalTensor
 
@@ -228,7 +228,6 @@ def test_Bloom_tetra():
         be sorted by their rounded representations in order to compare their
         values.
         """
-        
         arr = np.asarray(arr)
         arr = arr.round(decimals)
         indices = np.lexsort((arr[:, 2], arr[:, 1], arr[:, 0]))
@@ -276,3 +275,18 @@ def test_Pooling():
         data.edge_attr, batch=torch.zeros(4).long(),
         n_norm=5  # Bloom is sensitive to this
     )
+
+
+def test_Unpooling_merge_clusters():
+    rmin = 0.1
+    pos = torch.Tensor([
+        [0., 0., 0.],
+        [1., 0., 0.],
+        [1.05, 0., 0.]
+    ])
+    N = pos.shape[0]
+    batch = torch.zeros(N).long()
+    pos_map = Unpooling.merge_clusters(pos, r=rmin, batch=batch)
+    assert torch.allclose(
+        pos_map,
+        torch.LongTensor([[0, 1, 1], [0, 1, 2]]))
