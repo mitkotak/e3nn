@@ -290,3 +290,4 @@ def test_Unpooling_merge_clusters():
     assert torch.allclose(
         pos_map,
         torch.LongTensor([[0, 1, 1], [0, 1, 2]]))
+

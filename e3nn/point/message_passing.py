@@ -5,7 +5,7 @@ import networkx as nx
 import torch
 import torch_geometric as tg
 from torch_geometric.nn import nearest, radius_graph
-from torch_scatter import scatter_mean, scatter_std, scatter_add
+from torch_scatter import scatter_mean, scatter_std, scatter_add, scatter_max
 from torch_cluster import fps
 import torch_sparse
 
@@ -213,6 +213,7 @@ class Pooling(torch.nn.Module):
         gather_edge_index = torch.stack([clusters, bloom_batch], dim=0)  # [target, source]
         gather_edge_attr = pos[bloom_batch] - new_pos[clusters]
         C = int(max(clusters)) + 1
+        print(gather_edge_index)
         x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, N, C))
         new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, clusters)
         new_edge_attr = new_pos[new_edge_index[1]] - new_pos[new_edge_index[0]]
@@ -233,9 +234,9 @@ class Unpooling(torch.nn.Module):
         self.Rs_bloom = [(1, L, (-1)**L) for L in range(bloom_lmax + 1)]
         self.Rs_inter = self.Rs_bloom + Rs_out
         self.layers = torch.nn.ModuleDict()
-        self.layers['conv'] = bloom_conv_module(Rs_in, self.Rs_inter)
+        self.layers['conv'] = bloom_conv_module(Rs_in=Rs_in, Rs_out=self.Rs_inter)
         self.layers['bloom'] = bloom_module
-        self.layers['gather'] = gather_conv_module(Rs_out, Rs_out)
+        self.layers['gather'] = gather_conv_module(Rs_in=Rs_out, Rs_out=Rs_out)
 
     @classmethod
     def merge_clusters(self, pos, r, batch):
@@ -266,13 +267,23 @@ class Unpooling(torch.nn.Module):
         bloom_pos, bloom_batch = self.layers['bloom'](sph, pos, min_radius)
         pos_map = self.merge_clusters(bloom_pos, min_radius, batch[bloom_batch])  # Merge points
         new_pos = scatter_mean(bloom_pos, pos_map[0], dim=0)
+        C = new_pos.shape[0]
         gather_edge_index = torch.stack([pos_map[0], bloom_batch], dim=0)  # [target, source]
         gather_edge_attr = pos[bloom_batch] - new_pos[pos_map[0]]
-        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm)
-        # use get_new_edge_index or radius_graph?
-        new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, pos_map[0])
-        new_edge_attr = new_pos(new_edge_index[1]) - new_pos(new_edge_index[0])
-        return x, new_pos, new_edge_index, new_edge_attr
+        print(N, C, gather_edge_index)
+        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, N, C))
+        # Use bloom max diameter per example to construct radius graph
+        gather_max = scatter_max(gather_edge_attr.norm(2, -1), batch, dim=0)[0] * 2
+        print('gather_max', gather_max)
+        num_batch = scatter_add(x.new_ones(batch.shape), batch, dim=0)
+        new_edge_index = []
+        for i, m in enumerate(gather_max):
+            n = int(num_batch[:i].sum())
+            new_edge_index.append(radius_graph(new_pos[n:], m, loop=False) + n)
+        new_edge_index = torch.cat(new_edge_index, dim=-1)
+        new_edge_attr = new_pos[new_edge_index[1]] - new_pos[new_edge_index[0]]
+        new_batch = get_new_batch(gather_edge_index, batch[bloom_batch])
+        return x, new_pos, new_edge_index, new_edge_attr, new_batch
 
 
 class Bloom(torch.nn.Module):
