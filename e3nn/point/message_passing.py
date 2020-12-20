@@ -390,7 +390,6 @@ class SymmetricKMeans(KMeans):
             if i <= j:  # NetworkX graphs only need single edge
                 G.add_edge(int(i), int(j))
         node_groups = [list(G.subgraph(c).nodes) for c in nx.connected_components(G)]
-        print(node_groups)
         labels = pos.new_zeros(pos.shape[0])
         for i in range(len(node_groups)):
             labels[node_groups[i]] = i
