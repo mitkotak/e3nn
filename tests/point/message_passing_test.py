@@ -10,6 +10,12 @@ from e3nn.kernel import Kernel, GroupKernel
 from e3nn.point.message_passing import Convolution, WTPConv, KMeans, SymmetricKMeans, Pooling, Unpooling, get_new_edge_index, get_new_batch, Bloom
 from e3nn.radial import ConstantRadialModel
 from e3nn.tensor import SphericalTensor
+from e3nn.non_linearities.rescaled_act import sigmoid, swish, tanh
+from e3nn.radial import GaussianRadialModel
+from e3nn.kernel import Kernel
+from e3nn.networks import GatedConvParityNetwork
+from e3nn.point.data_helpers import DataNeighbors
+from functools import partial
 
 
 @pytest.mark.parametrize('Rs_in, Rs_out, n_source, n_target, n_edge', itertools.product([[1]], [[2]], [2, 3], [1, 3], [0, 3]))
@@ -247,23 +253,29 @@ def test_Bloom_tetra():
 
 
 def test_Pooling():
-    from e3nn.networks import GatedConvParityNetwork
-    from e3nn.point.data_helpers import DataNeighbors
-    from functools import partial
-
     bloom_lmax = 4
     rmax = 3.
+    number_of_basis = 5
     conv_kwargs = dict(
-        mul=4, number_of_basis=5, lmax=bloom_lmax, max_radius=rmax, convolution=Convolution, layers=3,
+        mul=4, number_of_basis=number_of_basis, lmax=bloom_lmax, max_radius=rmax, convolution=Convolution, layers=3,
     )
     Rs_in = [(1, 0, 1)]
     Rs_out = [(4, 0, 1), (4, 0, -1), (4, 1, 1), (4, 1, -1), (4, 2, 1), (4, 2, -1)]
+
+    RadialModel = partial(GaussianRadialModel, max_radius=rmax, min_radius=0.,
+                          number_of_basis=number_of_basis, h=100,
+                          L=bloom_lmax, act=swish)
+
+    K = partial(Kernel, RadialModel=RadialModel, selection_rule=partial(
+        o3.selection_rule_in_out_sh, lmax=bloom_lmax))
+
+    single_conv = lambda Rs_in, Rs_out: Convolution(K(Rs_in, Rs_out))
 
     conv = partial(GatedConvParityNetwork, **conv_kwargs)
     bloom = Bloom(res=300)
     cluster = SymmetricKMeans(rand_iter=20)
 
-    pool = Pooling(Rs_in, Rs_out, bloom_lmax, conv, bloom, cluster, conv)
+    pool = Pooling(Rs_in, Rs_out, bloom_lmax, conv, bloom, cluster, single_conv)
 
     shape = torch.tensor([(0, 0, 0), (1, 0, 0), (1, 1, 0), (2, 1, 0)]).double()  # zigzag
     x = torch.ones(4, 1).double()
@@ -291,3 +303,32 @@ def test_Unpooling_merge_clusters():
         pos_map,
         torch.LongTensor([[0, 1, 1], [0, 1, 2]]))
 
+
+def test_Unpooling():
+    bloom_lmax = 4
+    rmax = 3.
+    number_of_basis = 5
+    conv_kwargs = dict(
+        mul=4, number_of_basis=number_of_basis, lmax=bloom_lmax, max_radius=rmax, convolution=Convolution, layers=3,
+    )
+    Rs_in = [(1, 0, 1)]
+    Rs_out = [(4, 0, 1), (4, 0, -1), (4, 1, 1), (4, 1, -1), (4, 2, 1), (4, 2, -1)]
+
+    RadialModel = partial(GaussianRadialModel, max_radius=rmax, min_radius=0.,
+                          number_of_basis=number_of_basis, h=100,
+                          L=bloom_lmax, act=swish)
+
+    K = partial(Kernel, RadialModel=RadialModel, selection_rule=partial(
+        o3.selection_rule_in_out_sh, lmax=bloom_lmax))
+
+    single_conv = lambda Rs_in, Rs_out: Convolution(K(Rs_in, Rs_out))
+
+    conv = partial(GatedConvParityNetwork, **conv_kwargs)
+    bloom = Bloom(res=300)
+
+    unpool = Unpooling(Rs_in, Rs_out, bloom_lmax, conv, bloom, single_conv)
+    shape = torch.tensor([(0, 0, 0), (1, 0, 0), (1, 1, 0), (2, 1, 0)]).double()  # zigzag
+    x = torch.ones(4, 1).double()
+    data = DataNeighbors(x, shape, rmax, self_interaction=False)
+    # x, new_pos, new_edge_index, new_edge_attr, new_batch 
+    _ = unpool.forward(data.x, data.pos, data.edge_index, data.edge_attr, batch=torch.zeros(4).long(), n_norm=2)

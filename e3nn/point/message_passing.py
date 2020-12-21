@@ -214,7 +214,7 @@ class Pooling(torch.nn.Module):
         gather_edge_attr = pos[bloom_batch] - new_pos[clusters]
         C = int(max(clusters)) + 1
         print(gather_edge_index)
-        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, N, C))
+        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
         new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, clusters)
         new_edge_attr = new_pos[new_edge_index[1]] - new_pos[new_edge_index[0]]
         new_batch = get_new_batch(gather_edge_index, batch[bloom_batch])
@@ -270,11 +270,9 @@ class Unpooling(torch.nn.Module):
         C = new_pos.shape[0]
         gather_edge_index = torch.stack([pos_map[0], bloom_batch], dim=0)  # [target, source]
         gather_edge_attr = pos[bloom_batch] - new_pos[pos_map[0]]
-        print(N, C, gather_edge_index)
-        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, N, C))
+        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
         # Use bloom max diameter per example to construct radius graph
-        gather_max = scatter_max(gather_edge_attr.norm(2, -1), batch, dim=0)[0] * 2
-        print('gather_max', gather_max)
+        gather_max = scatter_max(gather_edge_attr.norm(2, -1), batch[bloom_batch], dim=0)
         num_batch = scatter_add(x.new_ones(batch.shape), batch, dim=0)
         new_edge_index = []
         for i, m in enumerate(gather_max):
