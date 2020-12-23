@@ -213,7 +213,6 @@ class Pooling(torch.nn.Module):
         gather_edge_index = torch.stack([clusters, bloom_batch], dim=0)  # [target, source]
         gather_edge_attr = pos[bloom_batch] - new_pos[clusters]
         C = int(max(clusters)) + 1
-        print(gather_edge_index)
         x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
         new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, clusters)
         new_edge_attr = new_pos[new_edge_index[1]] - new_pos[new_edge_index[0]]
@@ -239,7 +238,7 @@ class Unpooling(torch.nn.Module):
         self.layers['gather'] = gather_conv_module(Rs_in=Rs_out, Rs_out=Rs_out)
 
     @classmethod
-    def merge_clusters(self, pos, r, batch):
+    def merge_clusters(cls, pos, r, batch):
         # edges to merge
         edge_index = radius_graph(pos, r, batch=batch, loop=False)
         G = nx.Graph()
@@ -272,12 +271,14 @@ class Unpooling(torch.nn.Module):
         gather_edge_attr = pos[bloom_batch] - new_pos[pos_map[0]]
         x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
         # Use bloom max diameter per example to construct radius graph
-        gather_max = scatter_max(gather_edge_attr.norm(2, -1), batch[bloom_batch], dim=0)
-        num_batch = scatter_add(x.new_ones(batch.shape), batch, dim=0)
+        gather_max = scatter_max(gather_edge_attr.norm(2, -1), batch[bloom_batch], dim=0)[0]
+        num_batch = scatter_add(x.new_ones(batch.shape), batch, dim=0).long()
         new_edge_index = []
         for i, m in enumerate(gather_max):
-            n = int(num_batch[:i].sum())
-            new_edge_index.append(radius_graph(new_pos[n:], m, loop=False) + n)
+            n_start = int(num_batch[:i].sum())
+            n_end = int(num_batch[:i + 1].sum())
+            rad_graph = radius_graph(new_pos[n_start: n_end], m, loop=False)
+            new_edge_index.append(rad_graph + n_start)
         new_edge_index = torch.cat(new_edge_index, dim=-1)
         new_edge_attr = new_pos[new_edge_index[1]] - new_pos[new_edge_index[0]]
         new_batch = get_new_batch(gather_edge_index, batch[bloom_batch])
@@ -322,16 +323,46 @@ class Bloom(torch.nn.Module):
 
 class KMeans(torch.nn.Module):
     def __init__(self, tol=0.001, max_iter=300, score_norm=1):
+        """KMeans clustering.
+
+        Args:
+            tol (float, optional): Tolerance for KMeans clustering convergance. Defaults to 0.001.
+            max_iter (int, optional): Number of KMeans interactions per rand_iter. Defaults to 300.
+            score_norm (int, optional): Norm to use for scoring clusters. Defaults to 1.
+        """
         super().__init__()
         self.tol = tol
         self.max_iter = max_iter
         self.score_norm = score_norm
 
     def score(self, pos, batch, centroids, classification):
+        """Score clustering
+
+        Args:
+            pos (torch.Tensor of shape [num_nodes, 3]): 3D Cartesian positions of nodes.
+            batch (torch.LongTensor of shape [num_nodes]): Index of example per node.
+            centroids (torch.Tensor of shape [num_centroids, 3]): 3D Cartesian positions of centroids.
+            classification (torch.LongTensor of shape [num_nodes]): Index of cluster per node.
+
+        Returns:
+            torch.Tensor of shape [num_examples]: Score per example.
+        """
         scores = (pos - centroids[classification]).norm(self.score_norm, -1)
         return scatter_add(scores, batch, dim=0)
 
     def update_centroids(self, pos, batch, centroids, centroids_batch):
+        """Update centroids of KMeans clusters
+
+        Args:
+            pos (torch.Tensor of shape [num_nodes, 3]): 3D Cartesian positions of nodes.
+            batch (torch.LongTensor of shape [num_nodes]): Index of example per node.
+            centroids (torch.Tensor of shape [num_centroids, 3]): 3D Cartesian positions of centroids.
+            centroids_batch (torch.LongTensor of shape [num_centroids]): Index of example per centroid.
+
+        Returns:
+            torch.Tensor of shape [num_centroids, 3]: 3D Cartesian positions of updated centroids.
+            torch.LongTensor of shape [num_nodes]: Index of cluster per node.
+        """
         N = pos.shape[0]
         M = centroids.shape[0]
         classification = nearest(pos, centroids, batch, centroids_batch)
@@ -341,6 +372,20 @@ class KMeans(torch.nn.Module):
         return new_centroids, classification
 
     def forward(self, pos, batch, start_pos=None, start_batch=None, fps_ratio=0.5):
+        """[summary]
+
+        Args:
+            pos (torch.Tensor of shape [total_nodes, 3]): 3D Cartesian positions of nodes.
+            batch (torch.LongTensor of shape [total_nodes]): Index of example per node.
+            start_pos (torch.Tensor of shape [total_nodes, 3], optional): 3D Cartesian positions of nodes used for sampling initial centroids. Defaults to None.
+            start_batch (torch.LongTensor of shape [total_nodes], optional): Index of example per node for nodes used for sampling inital centroids. Defaults to None.
+            fps_ratio (float, optional): Ratio of points to choose for "Farthest Point Sampling". Defaults to 0.5.
+
+        Returns:
+            torch.LongTensor of shape [num_nodes]: Index of cluster per node.
+            torch.Tensor of shape [num_centroids, 3]: Centroids from KMeans clustering.
+            torch.LongTensor of shape [num_centroids]: Index of example per centroids.
+        """
         if start_pos is None:
             start_pos = pos
             start_batch = batch
@@ -356,43 +401,78 @@ class KMeans(torch.nn.Module):
 
 
 class SymmetricKMeans(KMeans):
+    "Symmetric KMeans clustering algorithm"
     def __init__(self, tol=0.001, max_iter=300, rand_iter=10, score_norm=1):
+        """Symmetric KMeans clustering algorithm
+
+        Args:
+            tol (float, optional): Tolerance for KMeans clustering convergance. Defaults to 0.001.
+            max_iter (int, optional): Number of KMeans interactions per rand_iter. Defaults to 300.
+            rand_iter (int, optional): Number of random iterations to perform KMeans clustering. Defaults to 10.
+            score_norm (int, optional): Norm to use for scoring clusters. Defaults to 1.
+        """
         super().__init__(tol, max_iter, score_norm=score_norm)
         self.rand_iter = rand_iter
-        self.score_norm = score_norm
 
     def cluster_edge_index_by_score(self, scores, classification, num_centroids, batch):
+        """Get the edge index for disconnected subgraphs of nodes in the union of best performing clusters.
+
+        Args:
+            scores (torch.Tensor of shape [rand_iter, batch_size]): The score of the Kmeans clustering per example per random iteration.
+            classification (torch.LongTensor of shape [rand_iter, batch_nodes]): Centroids labels for each point in all batches per random iteration.
+            num_centroids (int): The number of centroids used for KMeans.
+            batch ([torch.LongTensor of shape [batch_nodes]): The index of example per node.
+
+        Returns:
+            torch.LongTensor: Edge index of graph of best scoring disconnected subgraphs of clusters.
+        """
         N = batch.shape[0]
         batch_index = torch.stack([batch, torch.arange(N)], dim=0)
         min_scores = scores.min(dim=0)[0]
         best_scores = (scores <= min_scores).nonzero()
-        R, B, N, C = self.rand_iter, max(batch) + 1, batch.shape[0], num_centroids
+        # Sizes of our sparse tensor
+        R, B, C = self.rand_iter, max(batch) + 1, num_centroids
+        # This is doing the equivalent of
+        # torch.einsum('rbn)
         best_classifications = torch_sparse.spspmm(
             best_scores.T, scores.new_ones(best_scores.shape[0]),
             batch_index, scores.new_ones(N),
             R, B, N, coalesced=True
-        )[0]
+        )[0]  # Only keep edge_index of sparse tensor and not values
         best_clusters = classification[best_classifications[0], best_classifications[1]]
         cluster_index = torch.stack([best_clusters, best_classifications[1]], dim=0)
         cluster_edge_index = torch_sparse.spspmm(
             cluster_index[[1, 0]], scores.new_ones(cluster_index.shape[-1]),
             cluster_index, scores.new_ones(cluster_index.shape[-1]),
             N, C, N, coalesced=True
-        )
-        return cluster_edge_index[0]
+        )[0]  # Only keep edge_index of sparse tensor and not values
+        return cluster_edge_index
 
     def forward(self, pos, batch, start_pos=None, start_batch=None, fps_ratio=0.5):
+        """[summary]
+
+        Args:
+            pos (torch.Tensor of shape [total_nodes, 3]): 3D Cartesian positions of nodes.
+            batch (torch.LongTensor of shape [total_nodes]): Index of example per node.
+            start_pos (torch.Tensor of shape [total_nodes, 3], optional): 3D Cartesian positions of nodes used for sampling initial centroids. Defaults to None.
+            start_batch (torch.LongTensor of shape [total_nodes], optional): Index of example per node for nodes used for sampling inital centroids. Defaults to None.
+            fps_ratio (float, optional): Ratio of points to choose for "Farthest Point Sampling". Defaults to 0.5.
+
+        Returns:
+            cluster_batch: The index of cluster per node in pos.
+        """
         N = pos.shape[0]
         # Use giant batch for iterations of KMeans
         big_pos = torch.cat(self.rand_iter * [pos], dim=0)
-        big_batch = (batch.unsqueeze(0).repeat(self.rand_iter, 1) + torch.arange(self.rand_iter).unsqueeze(-1) * (batch.max() + 1)).reshape(-1)
+        big_batch = (batch[None].repeat(self.rand_iter, 1) + torch.arange(self.rand_iter)[..., None] * (batch.max() + 1)).reshape(-1)
         if start_batch is not None:
             big_start_pos = torch.cat(self.rand_iter * [start_pos], dim=0)
-            big_start_batch = (start_batch.unsqueeze(0).repeat(self.rand_iter, 1) + torch.arange(self.rand_iter).unsqueeze(-1) * (start_batch.max() + 1)).reshape(-1)
+            big_start_batch = (start_batch[None].repeat(self.rand_iter, 1) + torch.arange(self.rand_iter)[..., None] * (start_batch.max() + 1)).reshape(-1)
         else:
             big_start_pos = None
             big_start_batch = None
-        classification, centroids, _ = super().forward(big_pos, big_batch, start_pos=big_start_pos, start_batch=big_start_batch, fps_ratio=fps_ratio)
+        classification, centroids, _ = super().forward(
+            big_pos, big_batch, start_pos=big_start_pos, start_batch=big_start_batch, fps_ratio=fps_ratio)
         scores = self.score(big_pos, big_batch, centroids, classification)
         scores = scores.reshape(self.rand_iter, -1)
         classification = classification.reshape(self.rand_iter, -1)
