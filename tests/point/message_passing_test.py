@@ -7,7 +7,7 @@ import torch
 
 from e3nn import o3, rs
 from e3nn.kernel import Kernel, GroupKernel
-from e3nn.point.message_passing import Convolution, WTPConv, KMeans, SymmetricKMeans, Pooling, Unpooling, get_new_edge_index, get_new_batch, Bloom
+from e3nn.point.message_passing import Convolution, WTPConv, KMeans, SymmetricKMeans, Pooling, Unpooling, get_new_edge_index, Bloom
 from e3nn.radial import ConstantRadialModel
 from e3nn.tensor import SphericalTensor
 from e3nn.non_linearities.rescaled_act import sigmoid, swish, tanh
@@ -201,16 +201,6 @@ def test_get_new_edge_index():
 
     new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, cluster)
     assert torch.allclose(new_edge_index, torch.LongTensor([[0, 0, 1, 1], [0, 1, 0, 1]]))
-
-
-def test_get_new_batch():
-    gather_edge_index = torch.LongTensor([
-        [0, 0, 0, 0, 1, 1, 2, 3],
-        [0, 1, 2, 3, 4, 5, 6, 7]
-    ])
-    batch = torch.LongTensor([0, 0, 0, 0, 1, 1, 1, 1])
-    new_batch = get_new_batch(gather_edge_index, batch)
-    assert torch.allclose(new_batch, torch.LongTensor([0, 1, 1, 1]))
 
 
 def test_Bloom_no_peaks():

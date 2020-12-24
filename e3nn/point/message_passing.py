@@ -169,16 +169,6 @@ def get_new_edge_index(N, edge_index, bloom_batch, cluster):
     return new_edge_index
 
 
-def get_new_batch(gather_edge_index, batch):
-    C, N, B = max(gather_edge_index[0]) + 1, len(batch), max(batch) + 1
-    batch_index = torch.stack([torch.arange(batch.shape[0]), batch])
-    new_batch_index = torch_sparse.spspmm(
-        gather_edge_index, batch.new_ones(N),
-        batch_index, batch.new_ones(N),
-        C, N, B, coalesced=True)[0]
-    return new_batch_index[1]
-
-
 class Pooling(torch.nn.Module):
     def __init__(self, Rs_in, Rs_out, bloom_lmax, bloom_conv_module, bloom_module, cluster_module, gather_conv_module):
         """[summary]
@@ -209,14 +199,14 @@ class Pooling(torch.nn.Module):
             cluster_index,
             x.new_ones(cluster_index.shape[-1]),
             max(clusters) + 1, max(batch) + 1)[0]
+        self.cluster_index = cluster_index
         new_pos = scatter_mean(pos[cluster_index[1]], cluster_index[0], dim=0)
-        gather_edge_index = torch.stack([clusters, bloom_batch], dim=0)  # [target, source]
-        gather_edge_attr = pos[bloom_batch] - new_pos[clusters]
+        gather_edge_attr = pos[cluster_index[1]] - new_pos[cluster_index[0]]
         C = int(max(clusters)) + 1
-        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
-        new_edge_index = get_new_edge_index(N, edge_index, bloom_batch, clusters)
+        x = self.layers['gather'](x, cluster_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
+        new_edge_index = get_new_edge_index(N, edge_index, batch[cluster_index[1]], cluster_index[0])
         new_edge_attr = new_pos[new_edge_index[1]] - new_pos[new_edge_index[0]]
-        new_batch = get_new_batch(gather_edge_index, batch[bloom_batch])
+        new_batch = scatter_max(batch[cluster_index[1]], cluster_index[0])[0]  # Just grab indices
         return x, new_pos, new_edge_index, new_edge_attr, new_batch
 
 
@@ -281,16 +271,35 @@ class Unpooling(torch.nn.Module):
             new_edge_index.append(rad_graph + n_start)
         new_edge_index = torch.cat(new_edge_index, dim=-1)
         new_edge_attr = new_pos[new_edge_index[1]] - new_pos[new_edge_index[0]]
-        new_batch = get_new_batch(gather_edge_index, batch[bloom_batch])
+        new_batch = scatter_max(batch[gather_edge_index[1]], gather_edge_index[0])[0]  # Just grab indices
         return x, new_pos, new_edge_index, new_edge_attr, new_batch
 
 
 class Bloom(torch.nn.Module):
     def __init__(self, res=200):
+        """Module for generating new point sets from peaks of spherical harmonic projections.
+
+        Args:
+            res (int, optional): Resolution of grid to use for peak finding. Defaults to 200.
+        """
         super().__init__()
         self.res = res
 
     def forward(self, signal, pos, min_radius, percentage=False, absolute_min=0.01, use_L1=True):
+        """Get peaks of signal
+
+        Args:
+            signal (torch.Tensor of shape [num_nodes, (L_{max}+1)^2]): Spherical harmonic projection per node.
+            pos (torch.Tensor of shape [num_nodes, 3]): The Cartesian position per node.
+            min_radius (float): Minimum radius of peaks to add point.
+            percentage (bool, optional): Instead of min_radius, use percentage radius of max peak. Defaults to False.
+            absolute_min (float, optional): If percentage, what absolute min radius to use for peaks. Defaults to 0.01.
+            use_L1 (bool, optional): If no peaks, displace center by L=1 component. Defaults to True.
+
+        Returns:
+            torch.Tensor of shape [num_new_nodes]: 3D Cartesian position per new node.
+            torch.LongTensor of shape [num_new_nodes: Index of old node per new node.
+        """
         all_peaks = []
         new_indices = []
         signal = signal.detach()
@@ -485,7 +494,7 @@ class SymmetricKMeans(KMeans):
         N = int(pos.shape[0])
         [G.add_node(i) for i in range(N)]
         for i, j in cluster_edge_index.T:
-            if i <= j:  # NetworkX graphs only need single edge
+            if i < j:  # NetworkX graphs only need single edge, leave out self edges
                 G.add_edge(int(i), int(j))
         node_groups = [list(G.subgraph(c).nodes) for c in nx.connected_components(G)]
         labels = pos.new_zeros(pos.shape[0])
