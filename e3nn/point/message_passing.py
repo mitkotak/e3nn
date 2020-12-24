@@ -221,7 +221,8 @@ class Unpooling(torch.nn.Module):
         """
         super().__init__()
         self.Rs_bloom = [(1, L, (-1)**L) for L in range(bloom_lmax + 1)]
-        self.Rs_inter = self.Rs_bloom + Rs_out
+        self.Rs_centers = [(1, 0, 1), (1, 1, -1)]
+        self.Rs_inter = self.Rs_bloom + self.Rs_centers + Rs_out
         self.layers = torch.nn.ModuleDict()
         self.layers['conv'] = bloom_conv_module(Rs_in=Rs_in, Rs_out=self.Rs_inter)
         self.layers['bloom'] = bloom_module
@@ -252,17 +253,31 @@ class Unpooling(torch.nn.Module):
         N = pos.shape[0]
         out = self.layers['conv'](x, edge_index, edge_attr, n_norm=n_norm)
         sph = out[..., :rs.dim(self.Rs_bloom)]
-        x = out[..., rs.dim(self.Rs_bloom):]
+        # Determine whether to keep and displace center
+        centers = out[..., rs.dim(self.Rs_bloom):rs.dim(self.Rs_bloom) + rs.dim(self.Rs_centers)]
+        center_keepindices = (centers[:, 0] > 0.5).nonzero().reshape(-1)
+        center_keepdisplace = centers[:, 1:][center_keepindices]
+        center_pos = pos[center_keepindices] + center_keepdisplace[:, [2, 0, 1]]  # add displacement in yzx and change xyz
+        x = out[..., rs.dim(self.Rs_bloom) + rs.dim(self.Rs_centers):]  # get x to pass on to gather
+        # Get new points
         bloom_pos, bloom_batch = self.layers['bloom'](sph, pos, min_radius)
         pos_map = self.merge_clusters(bloom_pos, min_radius, batch[bloom_batch])  # Merge points
         new_pos = scatter_mean(bloom_pos, pos_map[0], dim=0)
         C = new_pos.shape[0]
+        new_pos = torch.cat([new_pos, center_pos], dim=0)
+        # Combine new positions and centers
+        center_indices = torch.arange(center_pos.shape[0]) + C
         gather_edge_index = torch.stack([pos_map[0], bloom_batch], dim=0)  # [target, source]
+        center_gather_edge_index = torch.stack([center_indices, center_keepindices], dim=0)
+        gather_edge_index = torch.cat([gather_edge_index, center_gather_edge_index], dim=-1)
         gather_edge_attr = pos[bloom_batch] - new_pos[pos_map[0]]
+        gather_edge_attr = torch.cat([gather_edge_attr, -center_keepdisplace], dim=0)  # Cat and reverse center displacements
         x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
         # Use bloom max diameter per example to construct radius graph
         gather_max = scatter_max(gather_edge_attr.norm(2, -1), batch[bloom_batch], dim=0)[0]
         num_batch = scatter_add(x.new_ones(batch.shape), batch, dim=0).long()
+        # Create new_edge_index based on max of bloom
+        ## Might break in case of structure that is in final form
         new_edge_index = []
         for i, m in enumerate(gather_max):
             n_start = int(num_batch[:i].sum())
