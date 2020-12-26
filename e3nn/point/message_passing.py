@@ -375,8 +375,42 @@ class Unpooling(torch.nn.Module):
         return x, new_pos, new_edge_index, new_edge_attr, new_batch
 
     @classmethod
-    def match_sph_and_centers_loss(cls):
-        pass
+    def teach_forcing_unpool_bloom(cls, cluster_index, cluster_pos, node_pos, min_radius=0.1):
+            """Use teacher forcing to create loss on unpool layers
+        
+        Args:
+            cluster_index (torch.LongTensor of shape [2, num_gather]): Index of edges of [cluster, node].
+            cluster_pos (torch.Tensor of shape [num_cluster, 3]): 3D Cartesian position per cluster.
+            node_pos (torch.Tensor of shape [num_node, 3]): 3D Cartesian position per node.
+        """
+        clusters = cluster_index[0]
+        nodes = cluster_index[1]
+        vecs = node_pos[nodes] - cluster_pos[clusters]
+        keepindices = vecs.norm(2, -1) > min_radius
+        centers = vecs.norm(2, -1) <= min_radius
+        signals = []
+        centers = []
+        C = clusters.max() + 1
+        for i in range(C):
+            vec_indices = (clusters == i & keepindices).nonzero().reshape(-1)
+            center_indices = (clusters == i & centers).nonzero().reshape(-1)
+            if vec_indices.shape[0] == 0 and center_indices.shape[0] == 0:
+                print("Hmm something's wrong. This cluster has no edges")
+            if vec_indices.shape[0] > 0:
+                signals.append(SphericalTensor.from_geometry(vecs[vec_indices], self.bloom_lmax).signal)
+            else:
+                signals.append(clusters.new_zeros((self.bloom_lmax + 1) ** 2))
+            if center_indices > 0:
+                if center_indices.shape[0] > 1:
+                    print("Warning - more than one node in min_radius.")
+                center_index = vecs[center_indices].norm(2, -1).argmax()
+                center_index = vecs[center].norm(2, -1).argmax()
+                L1 = node_pos.new(vecs[center_index][1, 2, 0])  # Permute x, y, z to y, z, x
+                L0 = node_pos.new([1.])
+                centers.append(torch.cat([L0, L1])) 
+            else:
+                centers.append(node_pos.new_zeros(4))
+        return torch.stack(signals, dim=0), torch.stack(centers, dim=0)
 
     @classmethod
     def match_final_x_loss(cls):
