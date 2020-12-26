@@ -187,27 +187,34 @@ class Pooling(torch.nn.Module):
         )
         return new_edge_index
 
-    def forward(self, x, pos, edge_index, edge_attr, min_radius=0.1, batch=None, n_norm=1):
-        N = pos.shape[0]
+    def new_points(self, x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=0.1):
         out = self.layers['conv'](x, edge_index, edge_attr, n_norm=n_norm)
-        sph = out[..., :rs.dim(self.Rs_bloom)]
+        self.sph = out[..., :rs.dim(self.Rs_bloom)]
         x = out[..., rs.dim(self.Rs_bloom):]
-        bloom_pos, bloom_batch = self.layers['bloom'](sph, pos, min_radius)
+        bloom_pos, bloom_batch = self.layers['bloom'](self.sph, pos, min_radius)
         clusters = self.layers['cluster'](bloom_pos, batch[bloom_batch], start_pos=pos, start_batch=batch)
         cluster_index = torch.stack([clusters, bloom_batch], dim=0)
         cluster_index = torch_sparse.coalesce(  # Remove duplicate edges
             cluster_index,
-            x.new_ones(cluster_index.shape[-1]),
+            pos.new_ones(cluster_index.shape[-1]),
             max(clusters) + 1, max(batch) + 1)[0]
-        self.cluster_index = cluster_index
         new_pos = scatter_mean(pos[cluster_index[1]], cluster_index[0], dim=0)
         gather_edge_attr = pos[cluster_index[1]] - new_pos[cluster_index[0]]
-        C = int(max(clusters)) + 1
+        return x, new_pos, cluster_index, clusters, gather_edge_attr
+
+    def new_graph(self, x, new_pos, cluster_index, gather_edge_attr, edge_index, batch, N, C, n_norm):
         x = self.layers['gather'](x, cluster_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
         new_edge_index = self.get_new_edge_index(N, edge_index, batch[cluster_index[1]], cluster_index[0])
         new_edge_attr = new_pos[new_edge_index[1]] - new_pos[new_edge_index[0]]
         new_batch = scatter_max(batch[cluster_index[1]], cluster_index[0])[0]  # Just grab indices
         return x, new_pos, new_edge_index, new_edge_attr, new_batch
+
+    def forward(self, x, pos, edge_index, edge_attr, min_radius=0.1, batch=None, n_norm=1):
+        N = pos.shape[0]
+        x, new_pos, self.cluster_index, clusters, gather_edge_attr = self.new_points(
+            x, pos, edge_index, edge_attr, batch, n_norm=n_norm, min_radius=min_radius)
+        C = int(max(clusters)) + 1
+        return self.new_graph(x, new_pos, self.cluster_index, gather_edge_attr, edge_index, batch, N, C, n_norm)
 
 
 class Unpooling(torch.nn.Module):
@@ -249,12 +256,16 @@ class Unpooling(torch.nn.Module):
             pos_map.append(pos_map_index)
         return torch.cat(pos_map, dim=-1)  # [2, N_old]
 
+    # Need to break up into conv, bloom, gather steps
+    # Each have different losses
     def forward(self, x, pos, edge_index, edge_attr, batch=None, n_norm=1, min_radius=0.1):
         N = pos.shape[0]
         out = self.layers['conv'](x, edge_index, edge_attr, n_norm=n_norm)
         sph = out[..., :rs.dim(self.Rs_bloom)]
         # Determine whether to keep and displace center
         centers = out[..., rs.dim(self.Rs_bloom):rs.dim(self.Rs_bloom) + rs.dim(self.Rs_centers)]
+        # Save for loss
+        self.sph, self.centers = sph, centers
         center_keepindices = (centers[:, 0] > 0.5).nonzero().reshape(-1)
         center_keepdisplace = centers[:, 1:][center_keepindices]
         center_pos = pos[center_keepindices] + center_keepdisplace[:, [2, 0, 1]]  # add displacement in yzx and change xyz
