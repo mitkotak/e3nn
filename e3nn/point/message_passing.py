@@ -212,7 +212,7 @@ class Pooling(torch.nn.Module):
     def forward(self, x, pos, edge_index, edge_attr, min_radius=0.1, batch=None, n_norm=1):
         N = pos.shape[0]
         x, new_pos, self.cluster_index, clusters, gather_edge_attr = self.new_points(
-            x, pos, edge_index, edge_attr, batch, n_norm=n_norm, min_radius=min_radius)
+            x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=min_radius)
         C = int(max(clusters)) + 1
         return self.new_graph(x, new_pos, self.cluster_index, gather_edge_attr, edge_index, batch, N, C, n_norm)
 
@@ -256,22 +256,18 @@ class Unpooling(torch.nn.Module):
             pos_map.append(pos_map_index)
         return torch.cat(pos_map, dim=-1)  # [2, N_old]
 
-    # Need to break up into conv, bloom, gather steps
-    # Each have different losses
-    def forward(self, x, pos, edge_index, edge_attr, batch=None, n_norm=1, min_radius=0.1):
-        N = pos.shape[0]
+    def new_points(self, x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=0.1):
         out = self.layers['conv'](x, edge_index, edge_attr, n_norm=n_norm)
-        sph = out[..., :rs.dim(self.Rs_bloom)]
+        self.sph = out[..., :rs.dim(self.Rs_bloom)]
         # Determine whether to keep and displace center
-        centers = out[..., rs.dim(self.Rs_bloom):rs.dim(self.Rs_bloom) + rs.dim(self.Rs_centers)]
+        self.centers = out[..., rs.dim(self.Rs_bloom):rs.dim(self.Rs_bloom) + rs.dim(self.Rs_centers)]
         # Save for loss
-        self.sph, self.centers = sph, centers
-        center_keepindices = (centers[:, 0] > 0.5).nonzero().reshape(-1)
-        center_keepdisplace = centers[:, 1:][center_keepindices]
+        center_keepindices = (self.centers[:, 0] > 0.5).nonzero().reshape(-1)
+        center_keepdisplace = self.centers[:, 1:][center_keepindices]
         center_pos = pos[center_keepindices] + center_keepdisplace[:, [2, 0, 1]]  # add displacement in yzx and change xyz
         x = out[..., rs.dim(self.Rs_bloom) + rs.dim(self.Rs_centers):]  # get x to pass on to gather
         # Get new points
-        bloom_pos, bloom_batch = self.layers['bloom'](sph, pos, min_radius)
+        bloom_pos, bloom_batch = self.layers['bloom'](self.sph, pos, min_radius)
         pos_map = self.merge_clusters(bloom_pos, min_radius, batch[bloom_batch])  # Merge points
         new_pos = scatter_mean(bloom_pos, pos_map[0], dim=0)
         C = new_pos.shape[0]
@@ -283,6 +279,9 @@ class Unpooling(torch.nn.Module):
         gather_edge_index = torch.cat([gather_edge_index, center_gather_edge_index], dim=-1)
         gather_edge_attr = pos[bloom_batch] - new_pos[pos_map[0]]
         gather_edge_attr = torch.cat([gather_edge_attr, -center_keepdisplace], dim=0)  # Cat and reverse center displacements
+        return x, new_pos, bloom_batch, gather_edge_index, gather_edge_attr
+
+    def new_graph(self, x, new_pos, gather_edge_index, gather_edge_attr, batch, bloom_batch, N, C, n_norm=1):
         x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
         # Use bloom max diameter per example to construct radius graph
         gather_max = scatter_max(gather_edge_attr.norm(2, -1), batch[bloom_batch], dim=0)[0]
@@ -299,6 +298,15 @@ class Unpooling(torch.nn.Module):
         new_edge_attr = new_pos[new_edge_index[1]] - new_pos[new_edge_index[0]]
         new_batch = scatter_max(batch[gather_edge_index[1]], gather_edge_index[0])[0]  # Just grab indices
         return x, new_pos, new_edge_index, new_edge_attr, new_batch
+
+    # Need to break up into conv, bloom, gather steps
+    # Each have different losses
+    def forward(self, x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=0.1):
+        N = pos.shape[0]
+        x, new_pos, bloom_batch, gather_edge_index, gather_edge_attr = self.new_points(
+            x, pos, edge_index, edge_attr, batch, n_norm=n_norm, min_radius=min_radius)
+        C = new_pos.shape[0]
+        return self.new_graph(x, new_pos, gather_edge_index, gather_edge_attr, batch, bloom_batch, N, C, n_norm=n_norm)
 
 
 class Bloom(torch.nn.Module):
