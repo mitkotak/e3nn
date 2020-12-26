@@ -321,4 +321,4 @@ def test_Unpooling():
     x = torch.ones(4, 1).double()
     data = DataNeighbors(x, shape, rmax, self_interaction=False)
     # x, new_pos, new_edge_index, new_edge_attr, new_batch 
-    _ = unpool.forward(data.x, data.pos, data.edge_index, data.edge_attr, batch=torch.zeros(4).long(), n_norm=2)
+    _ = unpool.unpool(data.x, data.pos, data.edge_index, data.edge_attr, batch=torch.zeros(4).long(), n_norm=2)

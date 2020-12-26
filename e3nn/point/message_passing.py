@@ -137,9 +137,12 @@ class WTPConv2(tg.nn.MessagePassing):
 
 class Pooling(torch.nn.Module):
     def __init__(self, Rs_in, Rs_out, bloom_lmax, bloom_conv_module, bloom_module, cluster_module, gather_conv_module):
-        """Pool graph to smaller graph with new features using learnable clustering.
+        """Pool to smaller graph with new features using learnable clustering.
 
         Args:
+            Rs_in: Representation list of input.
+            Rs_out: Representation list of output.
+            bloom_lmax (int): Max L of SphericalTensor used by bloom module.
             bloom_conv_module (torch.nn.Module): Module to apply convolutions to produce SphericalTensors and features.
             bloom_module (torch.nn.Module): Module used to produce new points from SphericalTensors from bloom_conv_module.
             cluster_module (torch.nn.Module): Module use to cluster new points from bloom_module.
@@ -221,7 +224,7 @@ class Pooling(torch.nn.Module):
         new_pos = scatter_mean(pos[cluster_index[1]], cluster_index[0], dim=0)
         # relative distance vector between new_pos and pos of cluster
         gather_edge_attr = pos[cluster_index[1]] - new_pos[cluster_index[0]]
-        return x, new_pos, cluster_index, clusters, gather_edge_attr
+        return x, new_pos, cluster_index, gather_edge_attr
 
     def new_points_features(self, x, new_pos, cluster_index, gather_edge_attr, edge_index, batch, n_norm):
         """From new positions and cluster_index, create new features.
@@ -242,28 +245,60 @@ class Pooling(torch.nn.Module):
             torch.Tensor of shape [num_edges, 3]: 3D Cartesian relative distance vectors of edges.
             torch.LongTensor of shape [num_new_nodes]: Index of example per new node.
         """
-        N, C = batch.shape[0], new_pos.shape[0]
+        N, C = batch.shape[0], (cluster_index[0].max() + 1)
         x = self.layers['gather'](x, cluster_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
         new_edge_index = self.get_new_edge_index(N, edge_index, batch[cluster_index[1]], cluster_index[0])
         new_edge_attr = new_pos[new_edge_index[1]] - new_pos[new_edge_index[0]]
         new_batch = scatter_max(batch[cluster_index[1]], cluster_index[0])[0]  # Just grab indices
         return x, new_pos, new_edge_index, new_edge_attr, new_batch
 
+    def cluster_sph(self, min_radius=0.1):
+        """Construct "self-consistent" sph signals from clusters"""
+        from e3nn.tensor import SphericalTensor
+        # cluster_index and gather_edge_attr are set during forward
+        clusters = self.cluster_index[0]
+        vecs = -self.gather_edge_attr[[1, 0]]  # Relative distance from old to new points
+        keepindices = vecs.norm(2, -1) > min_radius
+        centers = vecs.norm(2, -1) <= min_radius
+        signals = []
+        C = clusters.max() + 1
+        for i in range(C):
+            vec_indices = (clusters == i & keepindices).nonzero().reshape(-1)
+            center_indices = (clusters == i & centers).nonzero().reshape(-1)
+            if vec_indices.shape[0] == 0 and center_indices.shape[0] == 0:
+                print("Hmm something's wrong. This cluster has no edges")
+            elif vec_indices.shape[0] > 0:
+                signals.append(SphericalTensor.from_geometry(vecs[vec_indices], self.bloom_lmax).signal)
+            else:
+                if center_indices > 0:
+                    if center_indices.shape[0] > 1:
+                        print("Warning - more than one node in min_radius.")
+                    center_index = vecs[center_indices].norm(2, -1).argmax()
+                    signal = clusters.new((self.bloom_lmax + 1) ** 2)
+                    signal[1:3] = vecs[center_index][1, 2, 0]  # Permute x, y, z to y, z, x
+                    signals.append(signal)
+                else:
+                    print("Something is wrong. How did we get here?")
+        return torch.stack(signals, dim=0)
+
     def forward(self, x, pos, edge_index, edge_attr, min_radius=0.1, batch=None, n_norm=1):
-        x, new_pos, self.cluster_index, clusters, gather_edge_attr = self.new_points(
+        x, new_pos, self.cluster_index, self.gather_edge_attr = self.new_points(
             x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=min_radius)
         return self.new_points_features(
-            x, new_pos, self.cluster_index, gather_edge_attr, edge_index, batch, n_norm)
+            x, new_pos, self.cluster_index, self.gather_edge_attr, edge_index, batch, n_norm)
 
 
 class Unpooling(torch.nn.Module):
     def __init__(self, Rs_in, Rs_out, bloom_lmax, bloom_conv_module, bloom_module, gather_conv_module):
-        """[summary]
+        """Unpool to larger graph with new features.
 
         Args:
-            bloom_conv_module ([type]): [description]
-            peak_module ([type]): [description]
-            gather_conv_module ([type]): [description]
+            Rs_in: Representation list of input.
+            Rs_out: Representation list of output.
+            bloom_lmax (int): Max L of SphericalTensor used by bloom module.
+            bloom_conv_module (torch.nn.Module): Module to apply convolutions to produce SphericalTensors and features.
+            bloom_module (torch.nn.Module): Module used to produce new points from SphericalTensors from bloom_conv_module.
+            gather_conv_module (torch.nn.Module): Single convolution used to gather features to new points.
         """
         super().__init__()
         self.Rs_bloom = [(1, L, (-1)**L) for L in range(bloom_lmax + 1)]
@@ -297,14 +332,14 @@ class Unpooling(torch.nn.Module):
 
     def new_points(self, x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=0.1):
         out = self.layers['conv'](x, edge_index, edge_attr, n_norm=n_norm)
-        self.sph = out[..., :rs.dim(self.Rs_bloom)]
-        # Determine whether to keep and displace center
-        self.centers = out[..., rs.dim(self.Rs_bloom):rs.dim(self.Rs_bloom) + rs.dim(self.Rs_centers)]
-        # Save for loss
+        self.sph, self.centers, x = (
+            out[..., :rs.dim(self.Rs_bloom)],
+            out[..., rs.dim(self.Rs_bloom):rs.dim(self.Rs_bloom) + rs.dim(self.Rs_centers)],
+            out[..., rs.dim(self.Rs_bloom) + rs.dim(self.Rs_centers):]  # get x to pass on to gather
+        )
         center_keepindices = (self.centers[:, 0] > 0.5).nonzero().reshape(-1)
         center_keepdisplace = self.centers[:, 1:][center_keepindices]
         center_pos = pos[center_keepindices] + center_keepdisplace[:, [2, 0, 1]]  # add displacement in yzx and change xyz
-        x = out[..., rs.dim(self.Rs_bloom) + rs.dim(self.Rs_centers):]  # get x to pass on to gather
         # Get new points
         bloom_pos, bloom_batch = self.layers['bloom'](self.sph, pos, min_radius)
         pos_map = self.merge_clusters(bloom_pos, min_radius, batch[bloom_batch])  # Merge points
@@ -317,11 +352,11 @@ class Unpooling(torch.nn.Module):
         center_gather_edge_index = torch.stack([center_indices, center_keepindices], dim=0)
         gather_edge_index = torch.cat([gather_edge_index, center_gather_edge_index], dim=-1)
         gather_edge_attr = pos[bloom_batch] - new_pos[pos_map[0]]
-        gather_edge_attr = torch.cat([gather_edge_attr, -center_keepdisplace], dim=0)  # Cat and reverse center displacements
+        gather_edge_attr = torch.cat([gather_edge_attr, -center_keepdisplace], dim=0)  # Cat and invert center displacements
         return x, new_pos, bloom_batch, gather_edge_index, gather_edge_attr
 
     def new_points_features(self, x, new_pos, gather_edge_index, gather_edge_attr, batch, bloom_batch, n_norm=1):
-        N, C = batch.shape[0], new_pos.shape[0]
+        N, C = batch.shape[0], (gather_edge_index[0].max() + 1)
         x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
         # Use bloom max diameter per example to construct radius graph
         gather_max = scatter_max(gather_edge_attr.norm(2, -1), batch[bloom_batch], dim=0)[0]
@@ -339,11 +374,26 @@ class Unpooling(torch.nn.Module):
         new_batch = scatter_max(batch[gather_edge_index[1]], gather_edge_index[0])[0]  # Just grab indices
         return x, new_pos, new_edge_index, new_edge_attr, new_batch
 
-    # Need to break up into conv, bloom, gather steps
-    # Each have different losses
-    def forward(self, x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=0.1):
+    @classmethod
+    def match_sph_and_centers_loss(cls):
+        pass
+
+    @classmethod
+    def match_final_x_loss(cls):
+        pass
+
+    def unpool(self, x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=0.1):
         x, new_pos, bloom_batch, gather_edge_index, gather_edge_attr = self.new_points(
-            x, pos, edge_index, edge_attr, batch, n_norm=n_norm, min_radius=min_radius)
+            x, pos, edge_index, edge_attr, batch, n_norm=n_norm, min_radius=min_radius
+        )
+        return self.new_points_features(
+            x, new_pos, gather_edge_index, gather_edge_attr, batch, bloom_batch, n_norm=n_norm)
+
+    def forward(self, x, pos, edge_index, edge_attr, batch, new_pos, gather_edge_index, gather_edge_attr, bloom_batch, n_norm=1, min_radius=0.1):
+        """To be used with teacher forcing and a symmetric pooling layer"""
+        x, _, _, _, _ = self.new_points(
+            x, pos, edge_index, edge_attr, batch, n_norm=n_norm, min_radius=min_radius
+        )
         return self.new_points_features(
             x, new_pos, gather_edge_index, gather_edge_attr, batch, bloom_batch, n_norm=n_norm)
 
