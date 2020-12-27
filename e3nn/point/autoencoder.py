@@ -121,7 +121,7 @@ class Autoencoder(torch.nn.Module):
 
     @classmethod
     def loss_match_x(cls, xs, unpool_xs):
-        return ((xs[:-1]-unpool_xs[::-1]) ** 2).sum(0)
+        return ((xs[:-1]-unpool_xs.flip(0) ** 2).sum(0)
 
     @classmethod
     def loss_distribution_x(cls, xs):
@@ -141,7 +141,7 @@ class Autoencoder(torch.nn.Module):
         for map_index, map_attr in map_indices, map_attrs:
             cluster_sph, cluster_center = cls.signals_and_centers(map_index, map_attr, False, lmax, min_radius=min_radius)
             cluster_sphs.append(cluster_sph), cluster_centers.append(cluster_center)
-        return (cluster_sph - unpool_sphs[::-1]) ** 2 + (cluster_centers - unpool_centers[::-1]) ** 2
+        return (cluster_sph - unpool_sphs.flip(0)) ** 2 + (cluster_centers - unpool_centers.flip(0)) ** 2
 
     def decode_forward(self, n_norm, min_radius):
         """To be used for teacher forcing training"""
