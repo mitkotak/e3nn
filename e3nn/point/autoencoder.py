@@ -111,28 +111,48 @@ class Autoencoder(torch.nn.Module):
             signals.append(signal)
         return torch.stack(signals, dim=0), torch.stack(centers, dim=0)
 
-    def forward(self, x, pos, edge_index, edge_attr, batch, n_norm=1):
-        x, pos, edge_index, edge_attr, batch = self.encode(
-            x, pos, edge_index, edge_attr, batch=batch, n_norm=n_norm
-        )
-        compare_signals = []
-        # xs, positions, edge_indices, batches, sphs, cluster_indices
-        self.unpool_sph = []
-        self.unpool_centers = []
-        self.unpool_xs = []
-        self.unpool_edge_indices = []
-        self.unpool_edge_attrs = []
+    @classmethod
+    def loss(cls, xs, sphs, unpool_xs, unpool_sphs, unpool_centers, map_indices, map_attrs, lmax, min_radius=0.1):
+        match_loss = cls.loss_match_x(xs, unpool_xs)
+        dist_loss = cls.loss_distribution_x(xs)
+        cluster_loss = cls.loss_cluster_pool(sphs, map_indices, map_attrs, lmax, min_radius=min_radius)
+        unpool_loss = cls.loss_unpool_bloom(unpool_sphs, unpool_centers, map_indices, map_attrs, lmax, min_radius=min_radius)
+        return match_loss, dist_loss, cluster_loss, unpool_loss
+
+    @classmethod
+    def loss_match_x(cls, xs, unpool_xs):
+        return ((xs[:-1]-unpool_xs[::-1]) ** 2).sum(0)
+
+    @classmethod
+    def loss_distribution_x(cls, xs):
+        pass
+
+    @classmethod
+    def loss_cluster_pool(cls, sphs, map_indices, map_attrs, lmax, min_radius=0.1):
+        cluster_sphs = []
+        for map_index, map_attr in map_indices, map_attrs:
+            cluster_sph, _ = cls.signals_and_centers(map_index, map_attr, True, lmax, min_radius=min_radius)
+            cluster_sphs.append(cluster_sph)
+        return ((cluster_sphs - sphs) ** 2).sum(0)
+
+    @classmethod
+    def loss_unpool_bloom(cls, unpool_sphs, unpool_centers, map_indices, map_attrs, lmax, min_radius=0.1):
+        cluster_sphs, cluster_centers = [], []
+        for map_index, map_attr in map_indices, map_attrs:
+            cluster_sph, cluster_center = cls.signals_and_centers(map_index, map_attr, False, lmax, min_radius=min_radius)
+            cluster_sphs.append(cluster_sph), cluster_centers.append(cluster_center)
+        return (cluster_sph - unpool_sphs[::-1]) ** 2 + (cluster_centers - unpool_centers[::-1]) ** 2
+
+    def decode_forward(self, n_norm, min_radius):
+        """To be used for teacher forcing training"""
         for i in range(self.n_layers):
             i += 1
-            map_index = self.map_indices[-i]
-            map_attr = self.map_attrs[-i]
-            new_pos = self.pos[-i]
-            # get starting data
-            x, pos, edge_index, edge_attr, batch = (
-                self.xs[-i], self.positions[-i], self.edge_indices[-i], self.edge_attrs[-i]
+            x, pos, edge_index, edge_attr, batch, new_pos, new_pos, map_index, map_attr = (
+                self.xs[-i], self.positions[-i], self.edge_indices[-i], self.edge_attrs[-i], self.batch[-i],
+                self.positions[-(i+1)], self.map_indices[-i], self.map_attr[-i],
             )
             # get predictions
-            x, pos, edge_index, edge_attr, batch = self.unpool(
+            x, pos, edge_index, edge_attr, batch = self.unpool.forward(
                 x, pos, edge_index, edge_attr, batch,
                 new_pos, map_index, map_attr,
                 n_norm=n_norm, min_radius=min_radius
@@ -141,24 +161,13 @@ class Autoencoder(torch.nn.Module):
             self.unpool_edge_indices.append(edge_index)
             self.unpool_edge_attrs.append(edge_attr)
             self.unpool_sph.append(self.unpool.sph)
-            self.unpool_centers.append(self.unpool.centers)
+            self.unpool_centers.append(self.unpool.centers)    
 
-    def loss(cls):
-        pass
-        # Symmetric feature condition -- x that comes out of unpool gather is the same x that goes into pool
-        # Cluster condition -- bloom should reflect what cluster was ultimately choosen
-        # Symmetric bloom condition -- bloom of new points should be the same as points clsutered
-        # Symmetric centers condition -- center features should be the same as centers of pool
-
-    @classmethod
-    def loss_cluster_pool(cls, sph, map_index, map_attr, lmax, min_radius=0.1):
-        cluster_sph, _ = cls.signals_and_centers(map_index, map_attr, True, lmax, min_radius=min_radius)
-        return (cluster_sph - sph) ** 2
-
-    @classmethod
-    def loss_unpool_bloom(cls, sph, centers, map_index, map_attr, lmax, min_radius=0.1):
-        cluster_sph, cluster_centers = cls.signals_and_centers(map_index, map_attr, False, lmax, min_radius=min_radius)
-        return (cluster_sph - sph) ** 2 + (cluster_centers - centers) ** 2
+    def forward(self, x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=0.1):
+        x, pos, edge_index, edge_attr, batch = self.encode(
+            x, pos, edge_index, edge_attr, batch=batch, n_norm=n_norm, min_radius=min_radius
+        )
+        return self.decode_forward(min_radius)
 
 class Pooling(torch.nn.Module):
     def __init__(self, Rs_in, Rs_out, bloom_lmax, bloom_conv_module, bloom_module, cluster_module, gather_conv_module):

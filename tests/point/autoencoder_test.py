@@ -83,23 +83,23 @@ def test_SymmetryKMeans_cluster_edge_index_by_score():
 def test_Pooling_get_new_edge_index():
     N, B, C = 3, 6, 2
     edge_index = torch.LongTensor([[0, 1, 1, 2], [1, 0, 2, 1]])
-    bloom_batch = torch.LongTensor([0, 0, 1, 1, 2, 2])
+    map_batch = torch.LongTensor([0, 0, 1, 1, 2, 2])
     cluster = torch.LongTensor([0, 0, 0, 1, 1, 1])
-    assert(B == len(bloom_batch))
+    assert(B == len(map_batch))
     assert(C == max(cluster + 1))
 
-    new_edge_index = Pooling.get_new_edge_index(N, edge_index, bloom_batch, cluster)
+    new_edge_index = Pooling.get_new_edge_index(N, edge_index, map_batch, cluster)
     assert torch.allclose(new_edge_index, torch.LongTensor([[0, 0, 1, 1], [0, 1, 0, 1]]))
 
     N, B, C = 4, 6, 2
     edge_index = torch.LongTensor([[0, 0, 1, 1, 1, 2, 2, 2, 3, 3],
                                    [1, 2, 0, 2, 3, 0, 1, 3, 1, 2]])
-    bloom_batch = torch.LongTensor([0, 1, 1, 2, 2, 3])
+    map_batch = torch.LongTensor([0, 1, 1, 2, 2, 3])
     cluster = torch.LongTensor([0, 0, 1, 0, 1, 1])
-    assert(B == len(bloom_batch))
+    assert(B == len(map_batch))
     assert(C == max(cluster + 1))
 
-    new_edge_index = Pooling.get_new_edge_index(N, edge_index, bloom_batch, cluster)
+    new_edge_index = Pooling.get_new_edge_index(N, edge_index, map_batch, cluster)
     assert torch.allclose(new_edge_index, torch.LongTensor([[0, 0, 1, 1], [0, 1, 0, 1]]))
 
 
