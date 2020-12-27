@@ -25,7 +25,7 @@ class Autoencoder(torch.nn.Module):
     def encode(self, x, pos, edge_index, edge_attr, batch, n_norm):
         self.xs = [x]
         self.positions = [pos]
-        self.cluster_indices = []
+        self.map_indices = []
         self.edge_indices = [edge_index]
         self.edge_attrs = [edge_attr]
         self.batches = [batch]
@@ -34,11 +34,12 @@ class Autoencoder(torch.nn.Module):
             x, pos, edge_index, edge_attr, batch = self.pool(
                 x, pos, edge_index, edge_attr, batch=batch, n_norm=n_norm
             )
-            self.cluster_indices.append(self.pool.cluster_index)  # used for unpooling
+            self.map_indices.append(self.pool.map_index)  # used for unpooling
+            self.map_attrs.append(self.pool.map_attr)
             self.sphs.append(self.pool.sph)  # used for loss on bloom for clustering
             self.xs.append(x)
             self.positions.append(self.pos)
-            self.edge_indiecs.append(edge_index)
+            self.edge_indices.append(edge_index)
             self.edge_attrs.append(edge_attr)
             self.batches.append(batch)
         return x, pos, edge_index, edge_attr, batch
@@ -65,13 +66,12 @@ class Autoencoder(torch.nn.Module):
         return x, pos, edge_index, edge_attr, batch
 
     @classmethod
-    def signals_and_centers(cls, cluster_index, cluster_edge_attr, centers_in_sph, lmax, min_radius=0.1):
+    def signals_and_centers(cls, map_index, map_attr, centers_in_sph, lmax, min_radius=0.1):
         """Calculate signals and centers for given clustering
 
         Args:
-            cluster_index (torch.LongTensor of shape [2, num_bloom]): Index of edges of [cluster, node].
-            cluster_edge_attr (torch.Torch of shape [num_bloom, 3]): 3D Cartesian relative distance vector between cluster and node.
-            node_pos (torch.Tensor of shape [num_node, 3]): 3D Cartesian position per node.
+            map_index (torch.LongTensor of shape [2, num_map]): Index of edges of [cluster, node].
+            map_attr (torch.Torch of shape [num_map, 3]): 3D Cartesian relative distance vector between cluster and node.
             centers_in_sph (bool): Include center in spherical signal
             lmax (int): lmax for SphericalTensor
             min_radius (float, optional): min radius for SphericalTensor vectors.
@@ -80,8 +80,8 @@ class Autoencoder(torch.nn.Module):
             torch.Tensor of shape [nodes, (lmax + 1) ** 2]
             torch.Tensor of shape [nodes, 4]
         """
-        clusters = cluster_index[0]
-        vecs = -cluster_edge_attr[[1, 0]]
+        clusters = map_index[0]
+        vecs = -map_attr[[1, 0]]
         greater = vecs.norm(2, -1) > min_radius
         lesser = vecs.norm(2, -1) <= min_radius
         signals = []
@@ -101,19 +101,15 @@ class Autoencoder(torch.nn.Module):
                     print("Warning - more than one node in min_radius.")
                 center_index = vecs[center_indices].norm(2, -1).argmax()
                 center_pos = vecs[center_index][1, 2, 0]
-                L1 = cluster_edge_attr.new(center_pos)  # Permute x, y, z to y, z, x
-                L0 = cluster_edge_attr.new([1.])
+                L1 = map_attr.new(center_pos)  # Permute x, y, z to y, z, x
+                L0 = map_attr.new([1.])
                 if centers_in_sph and vec_indices.shape[0] > 0:
                     signal[1:3] = center_pos
                 centers.append(torch.cat([L0, L1], dim=0))
             else:
-                centers.append(cluster_edge_attr.new_zeros(4))
+                centers.append(map_attr.new_zeros(4))
             signals.append(signal)
         return torch.stack(signals, dim=0), torch.stack(centers, dim=0)
-
-    @classmethod
-    def match_loss():
-        pass
 
     def forward(self, x, pos, edge_index, edge_attr, batch, n_norm=1):
         x, pos, edge_index, edge_attr, batch = self.encode(
@@ -128,14 +124,17 @@ class Autoencoder(torch.nn.Module):
         self.unpool_edge_attrs = []
         for i in range(self.n_layers):
             i += 1
+            map_index = self.map_indices[-i]
+            map_attr = self.map_attrs[-i]
+            new_pos = self.pos[-i]
             # get starting data
             x, pos, edge_index, edge_attr, batch = (
                 self.xs[-i], self.positions[-i], self.edge_indices[-i], self.edge_attrs[-i]
             )
             # get predictions
             x, pos, edge_index, edge_attr, batch = self.unpool(
-                x, pos, edge_index, edge_attr, batch, 
-                new_pos, gather_edge_index, gather_edge_attr,
+                x, pos, edge_index, edge_attr, batch,
+                new_pos, map_index, map_attr,
                 n_norm=n_norm, min_radius=min_radius
             )
             self.unpool_xs.append(x)
@@ -143,11 +142,23 @@ class Autoencoder(torch.nn.Module):
             self.unpool_edge_attrs.append(edge_attr)
             self.unpool_sph.append(self.unpool.sph)
             self.unpool_centers.append(self.unpool.centers)
+
+    def loss(cls):
+        pass
         # Symmetric feature condition -- x that comes out of unpool gather is the same x that goes into pool
         # Cluster condition -- bloom should reflect what cluster was ultimately choosen
         # Symmetric bloom condition -- bloom of new points should be the same as points clsutered
         # Symmetric centers condition -- center features should be the same as centers of pool
 
+    @classmethod
+    def loss_cluster_pool(cls, sph, map_index, map_attr, lmax, min_radius=0.1):
+        cluster_sph, _ = cls.signals_and_centers(map_index, map_attr, True, lmax, min_radius=min_radius)
+        return (cluster_sph - sph) ** 2
+
+    @classmethod
+    def loss_unpool_bloom(cls, sph, centers, map_index, map_attr, lmax, min_radius=0.1):
+        cluster_sph, cluster_centers = cls.signals_and_centers(map_index, map_attr, False, lmax, min_radius=min_radius)
+        return (cluster_sph - sph) ** 2 + (cluster_centers - centers) ** 2
 
 class Pooling(torch.nn.Module):
     def __init__(self, Rs_in, Rs_out, bloom_lmax, bloom_conv_module, bloom_module, cluster_module, gather_conv_module):
@@ -172,7 +183,7 @@ class Pooling(torch.nn.Module):
         self.layers['gather'] = gather_conv_module(Rs_in=Rs_out, Rs_out=Rs_out)
 
     @classmethod
-    def get_new_edge_index(cls, N, edge_index, bloom_batch, cluster):
+    def get_new_edge_index(cls, N, edge_index, map_batch, cluster):
         """Get new edge_index for pooled geometry based on original edge_index
 
         Args:
@@ -184,13 +195,13 @@ class Pooling(torch.nn.Module):
         Returns:
             torch.LongTensor of shape [2, num_new_edges]: new edge_index
         """
-        B, C = len(bloom_batch), max(cluster + 1)
-        bloom_index = torch.stack([bloom_batch, torch.arange(len(bloom_batch))], dim=0)
-        cluster_index = torch.stack([torch.arange(len(bloom_batch)), cluster], dim=0)
-        E, F, G = edge_index.shape[-1], bloom_index.shape[-1], cluster_index.shape[-1]
+        B, C = len(map_batch), max(cluster + 1)
+        map_batch_index = torch.stack([map_batch, torch.arange(len(map_batch))], dim=0)
+        cluster_index = torch.stack([torch.arange(len(map_batch)), cluster], dim=0)
+        E, F, G = edge_index.shape[-1], map_batch.shape[-1], cluster_index.shape[-1]
         convert_edge_index, vals = torch_sparse.spspmm(
             edge_index, edge_index.new_ones(E, dtype=torch.float32),
-            bloom_index, edge_index.new_ones(F, dtype=torch.float32),
+            map_batch_index, edge_index.new_ones(F, dtype=torch.float32),
             N, N, B, coalesced=True
         )
         convert_edge_index, vals = torch_sparse.spspmm(
@@ -230,24 +241,24 @@ class Pooling(torch.nn.Module):
         bloom_pos, bloom_batch = self.layers['bloom'](self.sph, pos, min_radius)
         # Cluster bloom_pos based on centroids sampled from pos
         clusters = self.layers['cluster'](bloom_pos, batch[bloom_batch], start_pos=pos, start_batch=batch)
-        cluster_index = torch.stack([clusters, bloom_batch], dim=0)  # [cluster, pos]
-        cluster_index = torch_sparse.coalesce(  # Remove duplicate edges
-            cluster_index, pos.new_ones(cluster_index.shape[-1]),
+        map_index = torch.stack([clusters, bloom_batch], dim=0)  # [cluster, pos]
+        map_index = torch_sparse.coalesce(  # Remove duplicate edges
+            map_index, pos.new_ones(map_index.shape[-1]),
             max(clusters) + 1, max(batch) + 1)[0]
         # new points are the mean of pos in cluster, a single pos can be in several clusters
-        new_pos = scatter_mean(pos[cluster_index[1]], cluster_index[0], dim=0)
+        new_pos = scatter_mean(pos[map_index[1]], map_index[0], dim=0)
         # relative distance vector between new_pos and pos of cluster
-        gather_edge_attr = pos[cluster_index[1]] - new_pos[cluster_index[0]]
-        return x, new_pos, cluster_index, gather_edge_attr
+        map_attr = pos[map_index[1]] - new_pos[map_index[0]]
+        return x, new_pos, map_index, map_attr
 
-    def new_points_features(self, x, new_pos, cluster_index, gather_edge_attr, edge_index, batch, n_norm):
+    def new_points_features(self, x, new_pos, map_index, map_attr, edge_index, batch, n_norm):
         """From new positions and cluster_index, create new features.
 
         Args:
             x (torch.Tensor of shape [num_old_nodes, num_features]): features of old nodes from bloom.
             new_pos (torch.Tensor of shape [num_new_nodes, 3]): 3D Cartesian position of new nodes.
-            cluster_index (torch.LongTensor of shape [2, num_bloom]): Index that ties new to old nodes.
-            gather_edge_attr (torch.LongTensor of shape [num_bloom, 3]): 3D Cartesian relative distance vector between new and old nodes.
+            map_index (torch.LongTensor of shape [2, num_bloom]): Index that ties new to old nodes.
+            map_attr (torch.LongTensor of shape [num_bloom, 3]): 3D Cartesian relative distance vector between new and old nodes.
             edge_index (torch.LongTensor of shape [2, num_edges]): Edge index of original graph.
             batch (torch.LongTensor of shape [num_old_nodes]): Index of example per old node.
             n_norm (int): Number of average neighbors to normalize convolution. Defaults to 1.
@@ -259,18 +270,20 @@ class Pooling(torch.nn.Module):
             torch.Tensor of shape [num_edges, 3]: 3D Cartesian relative distance vectors of edges.
             torch.LongTensor of shape [num_new_nodes]: Index of example per new node.
         """
-        N, C = batch.shape[0], (cluster_index[0].max() + 1)
-        x = self.layers['gather'](x, cluster_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
-        new_edge_index = self.get_new_edge_index(N, edge_index, batch[cluster_index[1]], cluster_index[0])
+        N, C = batch.shape[0], (map_index[0].max() + 1)
+        x = self.layers['gather'](x, map_index, map_attr, n_norm=n_norm, size=(N, C))
+        new_edge_index = self.get_new_edge_index(N, edge_index, batch[map_index[1]], map_index[0])
         new_edge_attr = new_pos[new_edge_index[1]] - new_pos[new_edge_index[0]]
-        new_batch = scatter_max(batch[cluster_index[1]], cluster_index[0])[0]  # Just grab indices
+        new_batch = scatter_max(batch[map_index[1]], map_index[0])[0]  # Just grab indices
         return x, new_pos, new_edge_index, new_edge_attr, new_batch
 
     def forward(self, x, pos, edge_index, edge_attr, min_radius=0.1, batch=None, n_norm=1):
-        x, new_pos, self.cluster_index, self.gather_edge_attr = self.new_points(
-            x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=min_radius)
+        x, new_pos, self.map_index, self.map_attr = self.new_points(
+            x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=min_radius
+        )
         return self.new_points_features(
-            x, new_pos, self.cluster_index, self.gather_edge_attr, edge_index, batch, n_norm)
+            x, new_pos, self.map_index, self.map_attr, edge_index, batch, n_norm
+        )
 
 
 class Unpooling(torch.nn.Module):
@@ -333,30 +346,30 @@ class Unpooling(torch.nn.Module):
         new_pos = torch.cat([new_pos, center_pos], dim=0)
         # Combine new positions and centers
         center_indices = torch.arange(center_pos.shape[0]) + C
-        gather_edge_index = torch.stack([pos_map[0], bloom_batch], dim=0)  # [target, source]
-        center_gather_edge_index = torch.stack([center_indices, center_keepindices], dim=0)
-        gather_edge_index = torch.cat([gather_edge_index, center_gather_edge_index], dim=-1)
-        gather_edge_attr = pos[bloom_batch] - new_pos[pos_map[0]]
-        gather_edge_attr = torch.cat([gather_edge_attr, -center_keepdisplace], dim=0)  # Cat and invert center displacements
-        return x, new_pos, gather_edge_index, gather_edge_attr
+        map_index = torch.stack([pos_map[0], bloom_batch], dim=0)  # [target, source]
+        center_map_index = torch.stack([center_indices, center_keepindices], dim=0)
+        map_index = torch.cat([map_index, center_map_index], dim=-1)
+        map_attr = pos[bloom_batch] - new_pos[pos_map[0]]
+        map_attr = torch.cat([map_attr, -center_keepdisplace], dim=0)  # Cat and invert center displacements
+        return x, new_pos, map_index, map_attr
 
-    def new_points_features(self, x, new_pos, gather_edge_index, gather_edge_attr, batch, n_norm=1):
-        N, C = batch.shape[0], (gather_edge_index[0].max() + 1)
-        x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
+    def new_points_features(self, x, new_pos, map_index, map_attr, batch, n_norm=1):
+        N, C = batch.shape[0], (map_index[0].max() + 1)
+        x = self.layers['gather'](x, map_index, map_attr, n_norm=n_norm, size=(N, C))
         # Use bloom max diameter per example to construct radius graph
-        gather_max = scatter_max(gather_edge_attr.norm(2, -1), batch[gather_edge_index[1]], dim=0)[0]
+        map_max = scatter_max(map_attr.norm(2, -1), batch[map_index[1]], dim=0)[0]
         num_batch = scatter_add(x.new_ones(batch.shape), batch, dim=0).long()
         # Create new_edge_index based on max of bloom
         ## Might break in case of structure that is in final form
         new_edge_index = []
-        for i, m in enumerate(gather_max):
+        for i, m in enumerate(map_max):
             n_start = int(num_batch[:i].sum())
             n_end = int(num_batch[:i + 1].sum())
             rad_graph = radius_graph(new_pos[n_start: n_end], m, loop=False)
             new_edge_index.append(rad_graph + n_start)
         new_edge_index = torch.cat(new_edge_index, dim=-1)
         new_edge_attr = new_pos[new_edge_index[1]] - new_pos[new_edge_index[0]]
-        new_batch = scatter_max(batch[gather_edge_index[1]], gather_edge_index[0])[0]  # Just grab indices
+        new_batch = scatter_max(batch[map_index[1]], map_index[0])[0]  # Just grab indices
         return x, new_pos, new_edge_index, new_edge_attr, new_batch
 
     def unpool(self, x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=0.1):
@@ -366,13 +379,13 @@ class Unpooling(torch.nn.Module):
         return self.new_points_features(
             x, new_pos, gather_edge_index, gather_edge_attr, batch, n_norm=n_norm)
 
-    def forward(self, x, pos, edge_index, edge_attr, batch, new_pos, gather_edge_index, gather_edge_attr, n_norm=1, min_radius=0.1):
+    def forward(self, x, pos, edge_index, edge_attr, batch, new_pos, map_index, map_attr, n_norm=1, min_radius=0.1):
         """To be used with teacher forcing and a symmetric pooling layer"""
         x, _, _, _, _ = self.new_points(
             x, pos, edge_index, edge_attr, batch, n_norm=n_norm, min_radius=min_radius
         )
         return self.new_points_features(
-            x, new_pos, gather_edge_index, gather_edge_attr, batch, n_norm=n_norm
+            x, new_pos, map_index, map_attr, batch, n_norm=n_norm
         )
 
 
