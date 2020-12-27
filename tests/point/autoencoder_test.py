@@ -80,29 +80,6 @@ def test_SymmetryKMeans_cluster_edge_index_by_score():
     assert torch.allclose(cluster_edge_index, test_cluster_edge_index)
 
 
-def test_Pooling_get_new_edge_index():
-    N, B, C = 3, 6, 2
-    edge_index = torch.LongTensor([[0, 1, 1, 2], [1, 0, 2, 1]])
-    map_batch = torch.LongTensor([0, 0, 1, 1, 2, 2])
-    cluster = torch.LongTensor([0, 0, 0, 1, 1, 1])
-    assert(B == len(map_batch))
-    assert(C == max(cluster + 1))
-
-    new_edge_index = Pooling.get_new_edge_index(N, edge_index, map_batch, cluster)
-    assert torch.allclose(new_edge_index, torch.LongTensor([[0, 0, 1, 1], [0, 1, 0, 1]]))
-
-    N, B, C = 4, 6, 2
-    edge_index = torch.LongTensor([[0, 0, 1, 1, 1, 2, 2, 2, 3, 3],
-                                   [1, 2, 0, 2, 3, 0, 1, 3, 1, 2]])
-    map_batch = torch.LongTensor([0, 1, 1, 2, 2, 3])
-    cluster = torch.LongTensor([0, 0, 1, 0, 1, 1])
-    assert(B == len(map_batch))
-    assert(C == max(cluster + 1))
-
-    new_edge_index = Pooling.get_new_edge_index(N, edge_index, map_batch, cluster)
-    assert torch.allclose(new_edge_index, torch.LongTensor([[0, 0, 1, 1], [0, 1, 0, 1]]))
-
-
 def test_Bloom_no_peaks():
     bloom = Bloom()
     N = 2
@@ -179,6 +156,29 @@ def test_Pooling():
     )
 
 
+def test_Pooling_get_new_edge_index():
+    N, B, C = 3, 6, 2
+    edge_index = torch.LongTensor([[0, 1, 1, 2], [1, 0, 2, 1]])
+    map_batch = torch.LongTensor([0, 0, 1, 1, 2, 2])
+    cluster = torch.LongTensor([0, 0, 0, 1, 1, 1])
+    assert(B == len(map_batch))
+    assert(C == max(cluster + 1))
+
+    new_edge_index = Pooling.get_new_edge_index(N, edge_index, map_batch, cluster)
+    assert torch.allclose(new_edge_index, torch.LongTensor([[0, 0, 1, 1], [0, 1, 0, 1]]))
+
+    N, B, C = 4, 6, 2
+    edge_index = torch.LongTensor([[0, 0, 1, 1, 1, 2, 2, 2, 3, 3],
+                                   [1, 2, 0, 2, 3, 0, 1, 3, 1, 2]])
+    map_batch = torch.LongTensor([0, 1, 1, 2, 2, 3])
+    cluster = torch.LongTensor([0, 0, 1, 0, 1, 1])
+    assert(B == len(map_batch))
+    assert(C == max(cluster + 1))
+
+    new_edge_index = Pooling.get_new_edge_index(N, edge_index, map_batch, cluster)
+    assert torch.allclose(new_edge_index, torch.LongTensor([[0, 0, 1, 1], [0, 1, 0, 1]]))
+
+
 def test_Unpooling_merge_clusters():
     rmin = 0.1
     pos = torch.Tensor([
@@ -223,6 +223,32 @@ def test_Unpooling():
     # x, new_pos, new_edge_index, new_edge_attr, new_batch 
     _ = unpool.unpool(data.x, data.pos, data.edge_index, data.edge_attr, batch=torch.zeros(4).long(), n_norm=2)
 
+def test_Autoencoder_encode():
+    pass
+
+def test_Autoencoder_decode():
+    pass
+
+def test_Autoencoder_decode():
+    pass
 
 def test_Autoencoder_signal_and_centers():
+    pass
+
+def test_Autoencoder_loss():
+    pass
+
+def test_Autoencoder_loss_match_x():
+    pass
+
+def test_Autoencoder_loss_distribution_x():
+    pass
+
+def test_Autoencoder_loss_cluster_pool():
+    pass
+
+def test_Autoencoder_decode_forward():
+    pass
+
+def test_Autoencoder_forward():
     pass

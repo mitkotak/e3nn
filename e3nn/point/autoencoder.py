@@ -121,10 +121,10 @@ class Autoencoder(torch.nn.Module):
 
     @classmethod
     def loss_match_x(cls, xs, unpool_xs):
-        return ((xs[:-1]-unpool_xs.flip(0) ** 2).sum(0)
+        return (xs[:-1]-unpool_xs.flip(0) ** 2).sum(0)
 
     @classmethod
-    def loss_distribution_x(cls, xs):
+    def loss_distribution_x(cls):
         pass
 
     @classmethod
