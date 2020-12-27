@@ -19,6 +19,7 @@ from e3nn.point.autoencoder import KMeans, SymmetricKMeans, Bloom, Unpooling, Po
 from functools import partial
 torch.set_default_dtype(torch.float64)
 
+
 def test_KMeans():
     pos = torch.tensor([[0., 0., 0.], [0.2, 0., 0.], [1.0, 0., 0.], [1.2, 0., 0.]])
     centers = torch.tensor([[0.1, 0., 0.], [1.1, 0., 0.]])
@@ -221,3 +222,7 @@ def test_Unpooling():
     data = DataNeighbors(x, shape, rmax, self_interaction=False)
     # x, new_pos, new_edge_index, new_edge_attr, new_batch 
     _ = unpool.unpool(data.x, data.pos, data.edge_index, data.edge_attr, batch=torch.zeros(4).long(), n_norm=2)
+
+
+def test_Autoencoder_signal_and_centers():
+    pass

@@ -9,10 +9,144 @@ from torch_scatter import scatter_mean, scatter_std, scatter_add, scatter_max
 from torch_cluster import fps
 import torch_sparse
 
-from e3nn import rsh, rs
-from e3nn.tensor_product import WeightedTensorProduct, GroupedWeightedTensorProduct
-from e3nn.linear import Linear
+from e3nn import rs
 from e3nn.tensor import SphericalTensor
+
+
+class Autoencoder(torch.nn.Module):
+    def __init__(self, pool, unpool, n_layers, bloom_lmax):
+        super().__init__()
+        self.pool = pool
+        self.unpool = unpool
+        self.n_layers = n_layers
+        self.bloom_lmax = bloom_lmax
+        # min_radius should be included here instead of in forward
+
+    def encode(self, x, pos, edge_index, edge_attr, batch, n_norm):
+        self.xs = [x]
+        self.positions = [pos]
+        self.cluster_indices = []
+        self.edge_indices = [edge_index]
+        self.edge_attrs = [edge_attr]
+        self.batches = [batch]
+        self.sphs = []
+        for _ in range(self.n_layers):
+            x, pos, edge_index, edge_attr, batch = self.pool(
+                x, pos, edge_index, edge_attr, batch=batch, n_norm=n_norm
+            )
+            self.cluster_indices.append(self.pool.cluster_index)  # used for unpooling
+            self.sphs.append(self.pool.sph)  # used for loss on bloom for clustering
+            self.xs.append(x)
+            self.positions.append(self.pos)
+            self.edge_indiecs.append(edge_index)
+            self.edge_attrs.append(edge_attr)
+            self.batches.append(batch)
+        return x, pos, edge_index, edge_attr, batch
+
+    def decode(self, x, pos, edge_index, edge_attr, batch, n_norm):
+        for _ in range(self.n_layers):
+            x, pos, edge_index, edge_attr, batch = self.unpool(
+                x, pos, edge_index, edge_attr, batch=batch, n_norm=n_norm
+            )
+            self.xs.append(x)
+            self.positions.append(pos)
+            self.edge_indices.append(edge_index)
+            self.batches.append(batch)
+        return x, pos, edge_index, edge_attr, batch
+
+    def encode_decode(self, x, pos, edge_index, edge_attr, batch, n_norm):
+        # Likely will want to save various properties of intermediate representations
+        x, pos, edge_index, edge_attr, batch = self.encode(
+            x, pos, edge_index, edge_attr, batch=batch, n_norm=n_norm
+        )
+        x, pos, edge_index, edge_attr, batch = self.decode(
+            x, pos, edge_index, edge_attr, batch=batch, n_norm=n_norm
+        )
+        return x, pos, edge_index, edge_attr, batch
+
+    @classmethod
+    def signals_and_centers(cls, cluster_index, cluster_edge_attr, centers_in_sph, lmax, min_radius=0.1):
+        """Calculate signals and centers for given clustering
+
+        Args:
+            cluster_index (torch.LongTensor of shape [2, num_bloom]): Index of edges of [cluster, node].
+            cluster_edge_attr (torch.Torch of shape [num_bloom, 3]): 3D Cartesian relative distance vector between cluster and node.
+            node_pos (torch.Tensor of shape [num_node, 3]): 3D Cartesian position per node.
+            centers_in_sph (bool): Include center in spherical signal
+            lmax (int): lmax for SphericalTensor
+            min_radius (float, optional): min radius for SphericalTensor vectors.
+
+        Returns:
+            torch.Tensor of shape [nodes, (lmax + 1) ** 2]
+            torch.Tensor of shape [nodes, 4]
+        """
+        clusters = cluster_index[0]
+        vecs = -cluster_edge_attr[[1, 0]]
+        greater = vecs.norm(2, -1) > min_radius
+        lesser = vecs.norm(2, -1) <= min_radius
+        signals = []
+        centers = []
+        C = clusters.max() + 1
+        for i in range(C):
+            vec_indices = (clusters == i & greater).nonzero().reshape(-1)
+            center_indices = (clusters == i & lesser).nonzero().reshape(-1)
+            if vec_indices.shape[0] == 0 and center_indices.shape[0] == 0:
+                print("Hmm something's wrong. This cluster has no edges")
+            if vec_indices.shape[0] > 0:
+                signal = SphericalTensor.from_geometry(vecs[vec_indices], lmax).signal
+            else:
+                signal = clusters.new_zeros((lmax + 1) ** 2)
+            if center_indices > 0:
+                if center_indices.shape[0] > 1:
+                    print("Warning - more than one node in min_radius.")
+                center_index = vecs[center_indices].norm(2, -1).argmax()
+                center_pos = vecs[center_index][1, 2, 0]
+                L1 = cluster_edge_attr.new(center_pos)  # Permute x, y, z to y, z, x
+                L0 = cluster_edge_attr.new([1.])
+                if centers_in_sph and vec_indices.shape[0] > 0:
+                    signal[1:3] = center_pos
+                centers.append(torch.cat([L0, L1], dim=0))
+            else:
+                centers.append(cluster_edge_attr.new_zeros(4))
+            signals.append(signal)
+        return torch.stack(signals, dim=0), torch.stack(centers, dim=0)
+
+    @classmethod
+    def match_loss():
+        pass
+
+    def forward(self, x, pos, edge_index, edge_attr, batch, n_norm=1):
+        x, pos, edge_index, edge_attr, batch = self.encode(
+            x, pos, edge_index, edge_attr, batch=batch, n_norm=n_norm
+        )
+        compare_signals = []
+        # xs, positions, edge_indices, batches, sphs, cluster_indices
+        self.unpool_sph = []
+        self.unpool_centers = []
+        self.unpool_xs = []
+        self.unpool_edge_indices = []
+        self.unpool_edge_attrs = []
+        for i in range(self.n_layers):
+            i += 1
+            # get starting data
+            x, pos, edge_index, edge_attr, batch = (
+                self.xs[-i], self.positions[-i], self.edge_indices[-i], self.edge_attrs[-i]
+            )
+            # get predictions
+            x, pos, edge_index, edge_attr, batch = self.unpool(
+                x, pos, edge_index, edge_attr, batch, 
+                new_pos, gather_edge_index, gather_edge_attr,
+                n_norm=n_norm, min_radius=min_radius
+            )
+            self.unpool_xs.append(x)
+            self.unpool_edge_indices.append(edge_index)
+            self.unpool_edge_attrs.append(edge_attr)
+            self.unpool_sph.append(self.unpool.sph)
+            self.unpool_centers.append(self.unpool.centers)
+        # Symmetric feature condition -- x that comes out of unpool gather is the same x that goes into pool
+        # Cluster condition -- bloom should reflect what cluster was ultimately choosen
+        # Symmetric bloom condition -- bloom of new points should be the same as points clsutered
+        # Symmetric centers condition -- center features should be the same as centers of pool
 
 
 class Pooling(torch.nn.Module):
@@ -132,35 +266,6 @@ class Pooling(torch.nn.Module):
         new_batch = scatter_max(batch[cluster_index[1]], cluster_index[0])[0]  # Just grab indices
         return x, new_pos, new_edge_index, new_edge_attr, new_batch
 
-    def cluster_sph(self, min_radius=0.1):
-        """Construct "self-consistent" sph signals from clusters"""
-        from e3nn.tensor import SphericalTensor
-        # cluster_index and gather_edge_attr are set during forward
-        clusters = self.cluster_index[0]
-        vecs = -self.gather_edge_attr[[1, 0]]  # Relative distance from old to new points
-        keepindices = vecs.norm(2, -1) > min_radius
-        centers = vecs.norm(2, -1) <= min_radius
-        signals = []
-        C = clusters.max() + 1
-        for i in range(C):
-            vec_indices = (clusters == i & keepindices).nonzero().reshape(-1)
-            center_indices = (clusters == i & centers).nonzero().reshape(-1)
-            if vec_indices.shape[0] == 0 and center_indices.shape[0] == 0:
-                print("Hmm something's wrong. This cluster has no edges")
-            elif vec_indices.shape[0] > 0:
-                signals.append(SphericalTensor.from_geometry(vecs[vec_indices], self.bloom_lmax).signal)
-            else:
-                if center_indices > 0:
-                    if center_indices.shape[0] > 1:
-                        print("Warning - more than one node in min_radius.")
-                    center_index = vecs[center_indices].norm(2, -1).argmax()
-                    signal = clusters.new((self.bloom_lmax + 1) ** 2)
-                    signal[1:3] = vecs[center_index][1, 2, 0]  # Permute x, y, z to y, z, x
-                    signals.append(signal)
-                else:
-                    print("Something is wrong. How did we get here?")
-        return torch.stack(signals, dim=0)
-
     def forward(self, x, pos, edge_index, edge_attr, min_radius=0.1, batch=None, n_norm=1):
         x, new_pos, self.cluster_index, self.gather_edge_attr = self.new_points(
             x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=min_radius)
@@ -233,13 +338,13 @@ class Unpooling(torch.nn.Module):
         gather_edge_index = torch.cat([gather_edge_index, center_gather_edge_index], dim=-1)
         gather_edge_attr = pos[bloom_batch] - new_pos[pos_map[0]]
         gather_edge_attr = torch.cat([gather_edge_attr, -center_keepdisplace], dim=0)  # Cat and invert center displacements
-        return x, new_pos, bloom_batch, gather_edge_index, gather_edge_attr
+        return x, new_pos, gather_edge_index, gather_edge_attr
 
-    def new_points_features(self, x, new_pos, gather_edge_index, gather_edge_attr, batch, bloom_batch, n_norm=1):
+    def new_points_features(self, x, new_pos, gather_edge_index, gather_edge_attr, batch, n_norm=1):
         N, C = batch.shape[0], (gather_edge_index[0].max() + 1)
         x = self.layers['gather'](x, gather_edge_index, gather_edge_attr, n_norm=n_norm, size=(N, C))
         # Use bloom max diameter per example to construct radius graph
-        gather_max = scatter_max(gather_edge_attr.norm(2, -1), batch[bloom_batch], dim=0)[0]
+        gather_max = scatter_max(gather_edge_attr.norm(2, -1), batch[gather_edge_index[1]], dim=0)[0]
         num_batch = scatter_add(x.new_ones(batch.shape), batch, dim=0).long()
         # Create new_edge_index based on max of bloom
         ## Might break in case of structure that is in final form
@@ -254,58 +359,20 @@ class Unpooling(torch.nn.Module):
         new_batch = scatter_max(batch[gather_edge_index[1]], gather_edge_index[0])[0]  # Just grab indices
         return x, new_pos, new_edge_index, new_edge_attr, new_batch
 
-    @classmethod
-    def teacher_forcing_unpool_bloom(cls, cluster_index, cluster_pos, node_pos, min_radius=0.1):
-        """Calculate teacher forcing signals and centers on unpool layers
-        
-        Args:
-            cluster_index (torch.LongTensor of shape [2, num_gather]): Index of edges of [cluster, node].
-            cluster_pos (torch.Tensor of shape [num_cluster, 3]): 3D Cartesian position per cluster.
-            node_pos (torch.Tensor of shape [num_node, 3]): 3D Cartesian position per node.
-        """
-        clusters = cluster_index[0]
-        nodes = cluster_index[1]
-        vecs = node_pos[nodes] - cluster_pos[clusters]
-        keepindices = vecs.norm(2, -1) > min_radius
-        centers = vecs.norm(2, -1) <= min_radius
-        signals = []
-        centers = []
-        C = clusters.max() + 1
-        for i in range(C):
-            vec_indices = (clusters == i & keepindices).nonzero().reshape(-1)
-            center_indices = (clusters == i & centers).nonzero().reshape(-1)
-            if vec_indices.shape[0] == 0 and center_indices.shape[0] == 0:
-                print("Hmm something's wrong. This cluster has no edges")
-            if vec_indices.shape[0] > 0:
-                signals.append(SphericalTensor.from_geometry(vecs[vec_indices], self.bloom_lmax).signal)
-            else:
-                signals.append(clusters.new_zeros((self.bloom_lmax + 1) ** 2))
-            if center_indices > 0:
-                if center_indices.shape[0] > 1:
-                    print("Warning - more than one node in min_radius.")
-                center_index = vecs[center_indices].norm(2, -1).argmax()
-                center_index = vecs[center].norm(2, -1).argmax()
-                L1 = node_pos.new(vecs[center_index][1, 2, 0])  # Permute x, y, z to y, z, x
-                L0 = node_pos.new([1.])
-                centers.append(torch.cat([L0, L1])) 
-            else:
-                centers.append(node_pos.new_zeros(4))
-        return torch.stack(signals, dim=0), torch.stack(centers, dim=0)
-
     def unpool(self, x, pos, edge_index, edge_attr, batch, n_norm=1, min_radius=0.1):
-        x, new_pos, bloom_batch, gather_edge_index, gather_edge_attr = self.new_points(
+        x, new_pos, gather_edge_index, gather_edge_attr = self.new_points(
             x, pos, edge_index, edge_attr, batch, n_norm=n_norm, min_radius=min_radius
         )
         return self.new_points_features(
-            x, new_pos, gather_edge_index, gather_edge_attr, batch, bloom_batch, n_norm=n_norm)
+            x, new_pos, gather_edge_index, gather_edge_attr, batch, n_norm=n_norm)
 
-    def forward(self, x, pos, edge_index, edge_attr, batch, new_pos, gather_edge_index, gather_edge_attr, bloom_batch, n_norm=1, min_radius=0.1):
+    def forward(self, x, pos, edge_index, edge_attr, batch, new_pos, gather_edge_index, gather_edge_attr, n_norm=1, min_radius=0.1):
         """To be used with teacher forcing and a symmetric pooling layer"""
         x, _, _, _, _ = self.new_points(
             x, pos, edge_index, edge_attr, batch, n_norm=n_norm, min_radius=min_radius
         )
         return self.new_points_features(
-            x, new_pos, gather_edge_index, gather_edge_attr, batch, bloom_batch, n_norm=n_norm
+            x, new_pos, gather_edge_index, gather_edge_attr, batch, n_norm=n_norm
         )
 
 
