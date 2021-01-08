@@ -1,11 +1,8 @@
 # pylint: disable=arguments-differ, redefined-builtin, missing-docstring, no-member, invalid-name, line-too-long, not-callable, abstract-method
-import math
-import collections
 import networkx as nx
 import torch
-import torch_geometric as tg
 from torch_geometric.nn import nearest, radius_graph
-from torch_scatter import scatter_mean, scatter_std, scatter_add, scatter_max
+from torch_scatter import scatter_mean, scatter_add, scatter_max
 from torch_cluster import fps
 import torch_sparse
 
