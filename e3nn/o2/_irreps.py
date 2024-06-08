@@ -98,7 +98,7 @@ class Irrep(tuple):
         return self[1]
 
     def __repr__(self) -> str:
-        if self.p is 0:
+        if self.p == 0:
             p = ""
         else:
             p = {+1: "e", -1: "o"}[self.p]
@@ -147,7 +147,7 @@ class Irrep(tuple):
 
         See Also
         --------
-        o3.wigner_D
+        o2.D
         Irreps.D_from_angles
         """
         if k is None:
@@ -199,18 +199,18 @@ class Irrep(tuple):
 
         Returns
         -------
-        generator of `e3nn.o3.Irrep`
+        generator of `e3nn.o2.Irrep`
         """
         other = Irrep(other)
+        mmin = abs(self.m - other.m)
+        mmax = self.m + other.m
         if self.m == 0 and other.m == 0:
             yield Irrep(0, self.p * other.p)
-        if self.m == 0:
+        elif self.m == 0:
             yield Irrep(other.m)
-        if other.m == 0:
+        elif other.m == 0:
             yield Irrep(self.m)
-        mmin = abs(self.l - other.l)
-        mmax = self.l + other.l
-        if mmin == 0:
+        elif mmin == 0:
             yield Irrep(0, 1)
             yield Irrep(0, -1)
         else:
