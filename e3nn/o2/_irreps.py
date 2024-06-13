@@ -156,7 +156,7 @@ class Irrep(tuple):
         alpha, k = torch.broadcast_tensors(alpha, k)
 
         # Need to change
-        return _rotations.D(self.m, self.p, alpha, k)
+        return _rotation.D(self.m, self.p, alpha, k)
 
     def D_from_matrix(self, R) -> torch.Tensor:
         r"""Matrix of the representation, see `Irrep.D_from_angles`
@@ -621,3 +621,26 @@ class Irreps(tuple):
         R = d[..., None, None] * R
         k = (1 - d) / 2
         return self.D_from_angle(*_rotation.matrix_to_angle(R), k)
+    
+    @classmethod
+    def o3_to_o2_mapping(cls, o3_irreps):
+        o2_list = []
+        blocks = []
+        o2_ir_strs = []
+        for o3_ir in o3_irreps:
+            mul, l, p = o3_ir.mul, o3_ir.ir.l, o3_ir.ir.p
+            o2_ir_strs = []
+            if (l % 2 == 0 and p == 1) or (l % 2 == 1 and p == -1):
+                # Same parity as SH
+                scalar = '0e'
+                odd = torch.eye(2)
+                even = torch.tensor([[0, 1], [-1, 0]])
+            elif (l % 2 == 0 and p == -1) or (l % 2 == 1 and p == 1):
+                scalar = '0o'
+                odd = torch.tensor([[0, 1], [-1, 0]])
+                even = torch.eye(2)
+            else:
+                raise ValueError('Something is wrong')
+            o2_ir_strs += list([scalar] + list(map(str, range(1, l+1)))) * mul
+            blocks += list([torch.ones(1, 1)] + [odd if m % 2 == 1 else even for m in range(1, l+1)]) * mul
+        return Irreps("+".join(o2_ir_strs)), direct_sum(*blocks)
