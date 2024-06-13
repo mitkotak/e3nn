@@ -552,6 +552,19 @@ class Irreps(tuple):
         irreps = Irreps([(mul, ir) for ir, _, mul in out])
         return Ret(irreps, p, inv)
 
+    def regroup(self) -> "Irreps":
+        r"""Regroup the same irreps together.
+        Equivalent to :meth:`sort` followed by :meth:`simplify`.
+        Returns
+        -------
+            irreps: `e3nn.o3.Irreps`
+        Examples
+        --------
+        >>> Irreps("0e + 1 + 2").regroup()
+        1x0e+1x1+1x2
+        """
+        return self.sort().irreps.simplify()
+    
     @property
     def dim(self) -> int:
         return sum(mul * ir.dim for mul, ir in self)
