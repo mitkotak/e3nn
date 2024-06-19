@@ -23,7 +23,7 @@ classifiers = [
 dependencies = [
   "sympy",
   "scipy",
-  "torch>=1.8.0",
+  "torch",
   "opt_einsum_fx>=0.1.4"
 ]
 
