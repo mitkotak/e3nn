@@ -31,6 +31,10 @@ class FullTensorProduct(nn.Module):
         """Tensor Product adapted from https://github.com/e3nn/e3nn-jax/blob/cf37f3e95264b34587b3a202ea4c3eb82597307e/e3nn_jax/_src/tensor_products.py#L40-L135"""
         super(FullTensorProduct, self).__init__()
 
+        # Need to do fancy string checking for o3/o2
+        # Stop mixing between o3/o2 irreps. Throw an assert
+        # We will assume o3 unless specified
+        
         if regroup_output:
             irreps_in1 = o2.Irreps(irreps_in1).regroup()
             irreps_in2 = o2.Irreps(irreps_in2).regroup()
@@ -39,7 +43,7 @@ class FullTensorProduct(nn.Module):
         irreps_out = []
         for (mul_1, ir_1), slice_1 in zip(irreps_in1, irreps_in1.slices()):
             for (mul_2, ir_2), slice_2 in zip(irreps_in2, irreps_in2.slices()):
-                for ir_out in ir_1 * ir_2:
+                for ir_out in ir_1 * ir_2: # Might not be implemented correctly
                     if filter_ir_out is not None and ir_out not in filter_ir_out:
                         continue
                     cg = o2.decomp_3m(ir_1.m, ir_2.m, ir_out.m)

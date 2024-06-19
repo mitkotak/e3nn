@@ -111,6 +111,8 @@ def codegen_tensor_product_left_right(
         mul_ir_in2 = irreps_in2[ins.i_in2]
         mul_ir_out = irreps_out[ins.i_out]
         
+        
+        # Selection Rules
         p_mul =  mul_ir_in1.ir.p * mul_ir_in2.ir.p * mul_ir_out.ir.p
         assert p_mul == 0 or p_mul == 1
         m1, m2, m3 = mul_ir_in1.ir.m, mul_ir_in2.ir.m, mul_ir_out.ir.m
