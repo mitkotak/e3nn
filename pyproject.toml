@@ -20,11 +20,6 @@ classifiers = [
   "Operating System :: POSIX",
   "Operating System :: MacOS",
 ]
-dependencies = [
-  "sympy",
-  "scipy",
-  "torch",
-]
 
 [project.optional-dependencies]
 dev = [
@@ -47,6 +42,7 @@ exclude = [
 [tool.setuptools.dynamic]
 version = {attr = "e3nn.__version__"}
 readme = {file = ["README.md"]}
+dependencies = {file = ["requirements.txt"]}
 
 [tool.black]
 line-length = 127

@@ -1,0 +1,4 @@
+opt_einsum_fx
+torch
+sympy
+scipy
