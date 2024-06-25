@@ -25,10 +25,10 @@ STEPS = 100
 
 def main():
     for lmax in range(1, LMAX + 1):
-        irreps = o2.Irreps([f"{l}" for l in range(1, lmax + 1)])
+        irreps = o2.Irreps.circular_harmonics(lmax)
         irreps_x = (CHANNEL * irreps).regroup()
         x = irreps_x.randn(BATCH, -1).to(device=device)
-        irreps_y = (CHANNEL * o2.Irreps(["10"])).regroup()
+        irreps_y = (irreps).regroup()
         y = irreps_y.randn(BATCH, -1).to(device=device)
         print(f"{irreps_x} \otimes {irreps_y}")
 
