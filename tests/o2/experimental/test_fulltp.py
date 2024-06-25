@@ -4,7 +4,7 @@ import pytest
 
 
 @pytest.mark.parametrize("irreps_in1", ["0e + 1", "0e"])
-@pytest.mark.parametrize("irreps_in2", ["0e", "0e + 1"])
+@pytest.mark.parametrize("irreps_in2", ["0o", "0o + 1"])
 def test_fulltp(irreps_in1, irreps_in2):
     x = o2.Irreps(irreps_in1).randn(10, -1)
     y = o2.Irreps(irreps_in2).randn(10, -1)

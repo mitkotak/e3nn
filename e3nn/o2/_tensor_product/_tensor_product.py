@@ -194,9 +194,9 @@ class TensorProduct(CodeGenMixin, torch.nn.Module):
             mul_ir_in1 = self.irreps_in1[ins.i_in1]
             mul_ir_in2 = self.irreps_in2[ins.i_in2]
             mul_ir_out = self.irreps_out[ins.i_out]
-            
+
             # Selection Rules
-            p_mul =  mul_ir_in1.ir.p * mul_ir_in2.ir.p * mul_ir_out.ir.p
+            p_mul = mul_ir_in1.ir.p * mul_ir_in2.ir.p * mul_ir_out.ir.p
             assert p_mul == 0 or p_mul == 1
             m1, m2, m3 = mul_ir_in1.ir.m, mul_ir_in2.ir.m, mul_ir_out.ir.m
             assert m1 + m2 == m3 or abs(m1 - m2) == m3
