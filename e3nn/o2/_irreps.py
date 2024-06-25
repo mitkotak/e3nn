@@ -372,6 +372,28 @@ class Irreps(tuple):
                 out.append(_MulIr(mul, ir))
         return super().__new__(cls, out)
 
+    @staticmethod
+    def circular_harmonics(lmax: int) -> "Irreps":
+        r"""representation of the spherical harmonics
+
+        Parameters
+        ----------
+        lmax : int
+            maximum :math:`l`
+
+        Returns
+        -------
+        `e3nn.o2.Irreps`
+            representation of :math:`(C^0, C^1, \dots, C^{\mathrm{lmax}})`
+
+        Examples
+        --------
+
+        >>> Irreps.circular_harmonics(3)
+        1x0e+1x1+1x2+1x3
+        """
+        return Irreps([(1, (l, 0)) for l in range(lmax + 1)])
+
     def slices(self):
         r"""List of slices corresponding to indices for each irrep.
 
