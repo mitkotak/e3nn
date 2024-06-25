@@ -2,22 +2,15 @@
 
 from e3nn.util.datatypes import Path, Chunk
 from e3nn import o3
+from e3nn.o3.experimental._full_tp import _prepare_inputs
 
 import torch
 from torch import nn
 import numpy as np
 
-
-def _prepare_inputs(input1, input2):
-    dtype = torch.promote_types(input1.dtype, input2.dtype)
-
-    input1 = input1.to(dtype=dtype)
-    input2 = input2.to(dtype=dtype)
-
-    leading_shape = torch.broadcast_shapes(input1.shape[:-1], input2.shape[:-1])
-    input1 = input1.broadcast_to(leading_shape + (-1,))
-    input2 = input2.broadcast_to(leading_shape + (-1,))
-    return input1, input2, leading_shape
+def transpose(x):
+    "Yikes !"
+    return torch.permute(x, list(range(x.ndim))[::-1])
 
 class FullTensorProductSparse(nn.Module):
     def __init__(
@@ -48,7 +41,7 @@ class FullTensorProductSparse(nn.Module):
                         continue
                     l1, l2, l3 = ir_1.l, ir_2.l, ir_out.l
                     cg = o3.wigner_3j(l1, l2, l3)
-                    chunk = torch.zeros((2 * l3 + 1, mul_1, mul_2) + leading_shape)
+                    chunk = torch.empty((2 * l3 + 1, mul_1, mul_2) + leading_shape)
                     self.register_buffer(f"chunk_{l1}_{l2}_{l3}", chunk)
                     for m3 in range(-l3, l3 + 1):
                         if (l1, l2, l3) in m3s:
@@ -80,7 +73,7 @@ class FullTensorProductSparse(nn.Module):
         self.m3s = m3s
         self.m1m2s = m1m2s
         irreps_out = o3.Irreps(irreps_out)
-        self.irreps_out, _, self.inv = irreps_out.sort()
+        self.irreps_out,_, self.inv = irreps_out.sort()
         self.irreps_in1 = irreps_in1
         self.irreps_in2 = irreps_in2
 
@@ -96,20 +89,11 @@ class FullTensorProductSparse(nn.Module):
             (mul_2, input_dim2, slice_2),
             (output_mul, output_dim, _),
         ) in self.paths.items():
-            x1_t = input1[..., slice_1].reshape(
-                (
-                    input_dim1,
-                    mul_1,
-                ) +
-                leading_shape
-            )
-            x2_t = input2[..., slice_2].reshape(
-                (
-                    input_dim2,
-                    mul_2,
-                ) +
-                leading_shape
-            )
+            x1 = input1[..., slice_1].reshape(leading_shape + (mul_1, input_dim1))
+            x1_t = transpose(x1)
+            x2 = input2[..., slice_2].reshape(leading_shape + (mul_2, input_dim2))
+            x2_t = transpose(x2)
+
             chunk = getattr(self, f"chunk_{l1}_{l2}_{l3}")
             for m3 in self.m3s[(l1, l2, l3)]:
                 sum = 0
@@ -119,8 +103,8 @@ class FullTensorProductSparse(nn.Module):
                     path *= cg_coeff
                     sum += path
                 chunk[l3 + m3, ...] = sum
-            chunk = torch
-            chunk = torch.reshape(chunk, chunk.shape[:-3] + (output_mul * output_dim, ))
+            chunk = transpose(chunk)
+            chunk = torch.reshape(chunk, leading_shape + (output_mul * output_dim, ))
             chunks.append(chunk)
-
+        
         return torch.cat([chunks[i] for i in self.inv], dim=-1)
