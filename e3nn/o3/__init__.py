@@ -102,7 +102,6 @@ __all__ = [
     "FullyConnectedTensorProduct",
     "ElementwiseTensorProduct",
     "FullTensorProduct",
-    "FullTensorProductv2",
     "TensorSquare",
     "SphericalHarmonics",
     "spherical_harmonics",
