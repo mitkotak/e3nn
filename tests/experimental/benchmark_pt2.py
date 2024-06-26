@@ -46,10 +46,7 @@ def run_benchmark(irreps_type):
             f"{irreps_type.upper()} TP lmax {lmax} channel {CHANNEL} batch {BATCH}: {print_performance(lambda: tp_compile(x, y), times=100, repeat=10)*1000:.3f}ms"
         )
 
-        if irreps_type == "o2":
-            tp_experimental = experimental.FullTensorProductO2(irreps_x, irreps_y)
-        else:
-            tp_experimental = experimental.FullTensorProductO3(irreps_x, irreps_y)
+        tp_experimental = experimental.FullTensorProductv2(irreps_x, irreps_y)
 
         tp_experimental_compile = torch.compile(tp_experimental, mode=compile_mode, fullgraph=True).to(device=device)
         print(
