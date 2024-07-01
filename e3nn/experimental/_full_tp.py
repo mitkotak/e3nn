@@ -1,4 +1,4 @@
-from e3nn.util.datatypes import Path, Chunk
+from e3nn.util.datatypes import Path, Chunk, O3Context, O2Context
 from typing import Union, Callable, Optional
 from e3nn import o3, o2
 
@@ -15,39 +15,6 @@ def _prepare_inputs(input1, input2):
     input1 = input1.broadcast_to(leading_shape + (-1,))
     input2 = input2.broadcast_to(leading_shape + (-1,))
     return input1, input2, leading_shape
-
-
-class IrrepsContext:
-    def __init__(self, irreps_class):
-        self._Irreps = irreps_class
-
-    def clebsch_gordan(self, ir_1, ir_2, ir_out):
-        raise NotImplementedError
-
-    def path_hash(self, ir_1, ir_2, ir_out):
-        raise NotImplementedError
-
-
-class O3Context(IrrepsContext):
-    def __init__(self):
-        super().__init__(o3.Irreps)
-
-    def clebsch_gordan(self, ir_1, ir_2, ir_out):
-        return o3.wigner_3j(ir_1.l, ir_2.l, ir_out.l)
-
-    def path_hash(self, ir_1, ir_2, ir_out):
-        return (ir_1.l, ir_2.l, ir_out.l)
-
-
-class O2Context(IrrepsContext):
-    def __init__(self):
-        super().__init__(o2.Irreps)
-
-    def clebsch_gordan(self, ir_1, ir_2, ir_out):
-        return o2.decomp_3m(ir_1.m, ir_2.m, ir_out.m, ir_1.p, ir_2.p, ir_out.p)
-
-    def path_hash(self, ir_1, ir_2, ir_out):
-        return (ir_1.m, ir_1.p, ir_2.m, ir_2.p, ir_out.m, ir_out.p)
 
 
 class FullTensorProduct(nn.Module):
