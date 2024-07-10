@@ -30,6 +30,7 @@ The discrete representation is therefore
 """
 
 import math
+from typing import Optional, Union
 
 import torch
 import torch.fft
@@ -326,47 +327,54 @@ class ToS2Grid(torch.nn.Module):
         positions on the sphere, tensor of shape ``(res_beta, res_alpha, 3)``
     """
 
-    def __init__(self, coeffs: o3.Irreps = None, res=None, normalization: str = "component", dtype=None, device=None) -> None:
+    def __init__(self, lmax= None, res=None, normalization: str = "component", dtype=None, device=None, coeffs: Optional[o3.Irreps] = None) -> None:
         super().__init__()
+    
+        if coeffs is not None:
+            coeffs = o3.Irreps(coeffs) # Keeping the name lmax for backward compatibility
+            coeffs = o3.Irreps(coeffs)
+            coeffs = coeffs.regroup()
+            sh_lmax = coeffs.ls[-1]
 
-        coeffs = o3.Irreps(coeffs)
-        coeffs = coeffs.regroup()
-        lmax = coeffs.ls[-1]
-
+        else:
+             sh_lmax = lmax
         assert normalization in ["norm", "component", "integral"] or torch.is_tensor(
             normalization
         ), "normalization needs to be 'norm', 'component' or 'integral'"
 
         if isinstance(res, int) or res is None:
-            lmax, res_beta, res_alpha = _complete_lmax_res(lmax, res, None)
+            sh_lmax, res_beta, res_alpha = _complete_lmax_res(sh_lmax, res, None)
         else:
-            lmax, res_beta, res_alpha = _complete_lmax_res(lmax, *res)
+            sh_lmax, res_beta, res_alpha = _complete_lmax_res(sh_lmax, *res)
 
-        betas, alphas, shb, sha = spherical_harmonics_s2_grid(lmax, res_beta, res_alpha, dtype=dtype, device=device)
-        shb = shb.reshape(-1, lmax + 1, shb.shape[-1] // (lmax + 1))
+        betas, alphas, shb, sha = spherical_harmonics_s2_grid(sh_lmax, res_beta, res_alpha, dtype=dtype, device=device)
         n = None
         if normalization == "component":
             # normalize such that all l has the same variance on the sphere
             # given that all componant has mean 0 and variance 1
             n = (
                 math.sqrt(4 * math.pi)
-                * betas.new_tensor([1 / math.sqrt(2 * l + 1) for l in range(lmax + 1)])
-                / math.sqrt(lmax + 1)
+                * betas.new_tensor([1 / math.sqrt(2 * l + 1) for l in range(sh_lmax + 1)])
+                / math.sqrt(sh_lmax + 1)
             )
         if normalization == "norm":
             # normalize such that all l has the same variance on the sphere
             # given that all componant has mean 0 and variance 1/(2L+1)
-            n = math.sqrt(4 * math.pi) * betas.new_ones(lmax + 1) / math.sqrt(lmax + 1)
+            n = math.sqrt(4 * math.pi) * betas.new_ones(sh_lmax + 1) / math.sqrt(sh_lmax + 1)
         if normalization == "integral":
-            n = betas.new_ones(lmax + 1)
+            n = betas.new_ones(sh_lmax + 1)
         if torch.is_tensor(normalization):
             n = normalization
-        m_in = _expand_matrix(range(lmax + 1), dtype=dtype, device=device)  # [l, m, j]
-        m_out = _expand_matrix(coeffs.ls, dtype=dtype, device=device)  # [l, m, i]
-        shb = _rollout_sh(shb, lmax)
+        m_in = _expand_matrix(range(sh_lmax + 1), dtype=dtype, device=device)  # [l, m, j]
+        if coeffs is not None:
+            m_out = _expand_matrix(coeffs.ls, dtype=dtype, device=device)  # [l, m, i]
+        else:
+            m_out = m_in
+            shb = shb.reshape(-1, sh_lmax + 1, shb.shape[-1] // (sh_lmax + 1)) # [..., l*m] -> [..., l, m]
+            shb = _rollout_sh(shb, sh_lmax)
         shb = torch.einsum("lmj,bj,lmi,l->mbi", m_in, shb, m_out, n)  # [m, b, i]
 
-        self.lmax, self.res_beta, self.res_alpha = lmax, res_beta, res_alpha
+        self.lmax, self.res_beta, self.res_alpha = sh_lmax, res_beta, res_alpha
         self.register_buffer("alphas", alphas)
         self.register_buffer("betas", betas)
         self.register_buffer("sha", sha)
@@ -402,7 +410,7 @@ class ToS2Grid(torch.nn.Module):
         if sa >= sm and sa % 2 == 1:
             x = irfft(x, sa)
         else:
-            x = torch.einsum("am,zbm->zba", self.sha, x)
+            x = torch.einsum("am,...bm->...ba", self.sha, x)
         return x.reshape(*size, *x.shape[1:])
 
     def _make_tracing_inputs(self, n: int):
@@ -453,50 +461,57 @@ class FromS2Grid(torch.nn.Module):
     """
 
     def __init__(
-        self, res=None, coeffs: o3.Irreps = None, normalization: str = "component", lmax_in=None, dtype=None, device=None
-    ) -> None:
+        self, res=None, lmax = None, normalization: str = "component", lmax_in=None, dtype=None, device=None, coeffs: Optional[o3.Irreps] = None) -> None:
         super().__init__()
 
-        coeffs = o3.Irreps(coeffs)
-        coeffs = coeffs.regroup()
-        lmax = coeffs.ls[-1]
+        if coeffs is not None:
+            coeffs = o3.Irreps(coeffs) # Keeping the name lmax for backward compatibility
+            coeffs = o3.Irreps(coeffs)
+            coeffs = coeffs.regroup()
+            sh_lmax = coeffs.ls[-1]
+
+        else:
+            sh_lmax = lmax
 
         assert normalization in ["norm", "component", "integral"] or torch.is_tensor(
             normalization
         ), "normalization needs to be 'norm', 'component' or 'integral'"
 
         if isinstance(res, int) or res is None:
-            lmax, res_beta, res_alpha = _complete_lmax_res(lmax, res, None)
+            sh_lmax, res_beta, res_alpha = _complete_lmax_res(sh_lmax, res, None)
         else:
-            lmax, res_beta, res_alpha = _complete_lmax_res(lmax, *res)
-
+            sh_lmax, res_beta, res_alpha = _complete_lmax_res(sh_lmax, *res)
+        
         if lmax_in is None:
-            lmax_in = lmax
-
-        betas, alphas, shb, sha = spherical_harmonics_s2_grid(lmax, res_beta, res_alpha, dtype=dtype, device=device)
-        shb = shb.reshape(-1, lmax + 1, shb.shape[-1] // (lmax + 1))
+            lmax_in = sh_lmax
+    
+        betas, alphas, shb, sha = spherical_harmonics_s2_grid(sh_lmax, res_beta, res_alpha, dtype=dtype, device=device)
 
         # normalize such that it is the inverse of ToS2Grid
         n = None
         if normalization == "component":
             n = (
                 math.sqrt(4 * math.pi)
-                * betas.new_tensor([math.sqrt(2 * l + 1) for l in range(lmax + 1)])
+                * betas.new_tensor([math.sqrt(2 * l + 1) for l in range(sh_lmax + 1)])
                 * math.sqrt(lmax_in + 1)
             )
         if normalization == "norm":
-            n = math.sqrt(4 * math.pi) * betas.new_ones(lmax + 1) * math.sqrt(lmax_in + 1)
+            n = math.sqrt(4 * math.pi) * betas.new_ones(sh_lmax + 1) * math.sqrt(lmax_in + 1)
         if normalization == "integral":
             n = 4 * math.pi * betas.new_ones(lmax + 1)
         if torch.is_tensor(normalization):
             n = normalization
-        m_in = _expand_matrix(range(lmax + 1), dtype=dtype, device=device)  # [l, m, j]
-        m_out = _expand_matrix(coeffs.ls, dtype=dtype, device=device)  # [l, m, i]
-        shb = _rollout_sh(shb, lmax)
+        m_in = _expand_matrix(range(sh_lmax + 1), dtype=dtype, device=device)  # [l, m, j]
+        if coeffs is not None:
+            m_out = _expand_matrix(coeffs.ls, dtype=dtype, device=device)  # [l, m, i]
+        else:
+            m_out = m_in
+            shb = shb.reshape(-1, sh_lmax + 1, shb.shape[-1] // (sh_lmax + 1))
+            shb = _rollout_sh(shb, sh_lmax)
         assert res_beta % 2 == 0
         qw = _quadrature_weights(res_beta // 2, dtype=dtype, device=device) * res_beta**2 / res_alpha  # [b]
         shb = torch.einsum("lmj,bj,lmi,l,b->mbi", m_in, shb, m_out, n, qw)  # [m, b, i]
-        self.lmax, self.res_beta, self.res_alpha = lmax, res_beta, res_alpha
+        self.lmax, self.res_beta, self.res_alpha = sh_lmax, res_beta, res_alpha
         self.register_buffer("alphas", alphas)
         self.register_buffer("betas", betas)
         self.register_buffer("sha", sha)
@@ -531,7 +546,7 @@ class FromS2Grid(torch.nn.Module):
         if sm <= sa and sa % 2 == 1:
             x = rfft(x, sm // 2)
         else:
-            x = torch.einsum("am,zba->zbm", self.sha, x)
+            x = torch.einsum("am,...ba->...bm", self.sha, x)
         x = torch.einsum("mbi, ...bm -> ...i", self.shb, x)
         return x.reshape(*size, x.shape[1])
 
