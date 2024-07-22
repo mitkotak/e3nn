@@ -8,6 +8,7 @@ from ._s2act import S2Activation
 from ._so3act import SO3Activation
 from ._normact import NormActivation
 from ._dropout import Dropout
+from .experimental._activation import soft_odd
 
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "BatchNorm",
     "FullyConnectedNet",
     "Activation",
+    "soft_odd",
     "Gate",
     "Identity",
     "S2Activation",
