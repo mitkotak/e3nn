@@ -1,5 +1,6 @@
 from typing import Callable, List, Optional
 import torch
+from torch import nn
 import torch.nn.functional as F
 
 from e3nn import o3
@@ -54,7 +55,7 @@ def normalize_function(phi: Callable[[float], float]) -> Callable[[float], float
     c = torch.mean(phi(x) ** 2) ** 0.5
     c = c.item()
 
-    if torch.allclose(c, 1.0):
+    if np.allclose(c, 1.0):
         return phi
     else:
 
@@ -76,7 +77,6 @@ def parity_function(phi: Callable[[float], float]) -> int:
 
 def is_zero_in_zero(phi: Callable[[float], float]) -> bool:
     return torch.allclose(phi(torch.Tensor([0.0])), 0.0)
-
         
 class ScalarActivation(nn.Module):
     
@@ -93,7 +93,7 @@ class ScalarActivation(nn.Module):
         Args:
             input (IrrepsArray): input irreps
             acts (optional, list of functions): list of activation functions, one for each chunk of the input
-            even_act (Callable[[float], float]): Activation function for even scalars. Default: :func:`jax.nn.gelu`.
+            even_act (Callable[[float], float]): Activation function for even scalars. Default: :func:`F.gelu`.
             odd_act (Callable[[float], float]): Activation function for odd scalars. Default: :math:`(1 - \exp(-x^2)) x`.
             normalize_act (bool): if True, normalize the activation functions using `normalize_function`
 
@@ -101,24 +101,23 @@ class ScalarActivation(nn.Module):
             The parity of the output depends on the parity of the activation function.
         """
 
+        super(ScalarActivation, self).__init__()
+
         if acts is None:
             acts = [
                 {1: even_act, -1: odd_act}[ir.p] if ir.l == 0 else None
-                for _, ir in input.irreps
+                for _, ir in irreps_in
             ]
 
         assert len(irreps_in) == len(acts), (irreps_in, acts)
-
-        self.acts = acts
-        
-  
-
         irreps_out = []
-        for (mul, (l_in, p_in)), x, act in zip(irreps_in, irreps_in.slices(), acts):
+        paths = {}
+
+        for (mul, (l_in, p_in)), slice_x, act in zip(irreps_in, irreps_in.slices(), acts):
             if act is not None:
                 if l_in != 0:
                     raise ValueError(
-                        f"Activation: cannot apply an activation function to a non-scalar input. {input.irreps} {acts}"
+                        f"Activation: cannot apply an activation function to a non-scalar input. {irreps_in} {acts}"
                     )
 
                 if normalize_act:
@@ -131,68 +130,68 @@ class ScalarActivation(nn.Module):
                     )
 
                 irreps_out.append((mul, (0, p_out)))
-                if x is None:
-                    if is_zero_in_zero(act):
-                        continue
-                    else:
-                        chunks.append(
-                            act(jnp.ones(input.shape[:-1] + (mul, 1), input.dtype))
-                        )
-                else:
-                    chunks.append(act(x))
             else:
                 irreps_out.append((mul, (l_in, p_in)))
-                chunks.append(x)
+                
+            paths[l_in] = (slice_x, act)
 
-        irreps_out = e3nn.Irreps(irreps_out)
-
-
-
-    def forward(self,
-                input: torch.Tensor):
-        
-        chunks = []
-        for (mul, (l_in, p_in)), x, act in zip(irreps_in, irreps_in.slices(), acts):
-            if act is not None:
-                if l_in != 0:
-                    raise ValueError(
-                        f"Activation: cannot apply an activation function to a non-scalar input. {input.irreps} {acts}"
-                    )
-
-                if normalize_act:
-                    act = normalize_function(act)
-
-                p_out = parity_function(act) if p_in == -1 else p_in
-                if p_out == 0:
-                    raise ValueError(
-                        "Activation: the parity is violated! The input scalar is odd but the activation is neither even nor odd."
-                    )
-
-                irreps_out.append((mul, (0, p_out)))
-                if x is None:
-                    if is_zero_in_zero(act):
-                        continue
-                    else:
-                        chunks.append(
-                            act(jnp.ones(input.shape[:-1] + (mul, 1), input.dtype))
-                        )
-                else:
-                    chunks.append(act(x))
-            else:
-                irreps_out.append((mul, (l_in, p_in)))
-                chunks.append(x)
+        self._same_acts = False
         # for performance, if all the activation functions are the same, we can apply it to the contiguous array as well:
         if acts and acts.count(acts[0]) == len(acts):
             if acts[0] is None:
-                array = input.array
+                self.act = None
             else:
                 act = acts[0]
                 if normalize_act:
-                    act = normalize_function(act)
-                array = act(input.array)
-            return e3nn.IrrepsArray(
-                irreps_out, array, zero_flags=[x is None for x in chunks]
-            )
-            
+                    self.act = normalize_function(act)
+ 
+        irreps_out = o3.Irreps(irreps_out)
+        self.irreps_out, _, self.inv = irreps_out.sort()
+        self.paths = paths
+
+    def forward(self, input: torch.Tensor):
         
-        return e3nn.from_chunks(irreps_out, chunks, input.shape[:-1], input.dtype)
+        if self._same_acts:
+            if self.act is None:
+                return input
+            else:
+                return self.act(input)
+    
+        chunks = []
+        for (slice_x, act) in self.paths.values():
+            if act is None:
+                chunks.append(input[..., slice_x])
+            else:
+                chunks.append(act(input[..., slice_x]))
+
+        return torch.cat([chunks[i] for i in self.inv], dim=-1)
+
+class NormActivation(nn.Module):
+    def __init__(self,
+                 irreps_in: o3.Irreps,
+                 acts: List[Optional[Callable[[float], float]]],
+                 *,
+                 normalization: str = "component",):
+        
+        super(NormActivation, self).__init__()
+        
+        assert len(irreps_in) == len(acts), (irreps_in, acts)
+
+        paths = {}
+        for (mul, (l_in, p_in)), slice_x, act in zip(irreps_in, irreps_in.slices(), acts):
+            if act is None:
+                continue
+            paths[l_in] = (slice_x, act)
+  
+    def forward(self, input: torch.Tensor):
+        chunks = []
+        for slice_x, act in self.paths.values():
+            x = input[..., slice_x]
+            n2 = torch.sum(x**2, axis=-1, keepdims=True)
+            if self.normalization == "component":
+                n2 = n2 / x.shape[-1]
+            n = torch.where(n2 > 0.0, torch.sqrt(torch.where(n2 > 0.0, n2, 1.0)), 1.0)
+            x = x * act(n)
+
+            chunks.append(x)
+        return torch.cat(chunks, dim=-1)

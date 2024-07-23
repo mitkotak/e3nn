@@ -4,7 +4,7 @@ from typing import Callable
 from ._activation import soft_odd
 import torch.nn.functional as F
 
-class GateV2(nn.Module):
+class Gate(nn.Module):
     '''
     The input is split into scalars that are activated separately, scalars that are used as gates, and non-scalars that are
     multiplied by the gates.
@@ -27,4 +27,6 @@ class GateV2(nn.Module):
                  odd_act: Callable[[float], float] = soft_odd,
                  even_gate_act: Callable[[float], float] = F.sigmoid,
                  odd_gate_act: Callable[[float], float] = F.tanh):
-        pass
+        
+        
+        
